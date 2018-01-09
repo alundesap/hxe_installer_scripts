@@ -46,6 +46,30 @@ promptImageRootDir() {
 	if [ -d "${IMAGE_DIR}/${DATA_UNITS_DIR}/${XSA_RT_COMP_DIR}" ]; then
 		IMAGE_HAS_XSA=1
 	fi
+
+	if [ -f "${IMAGE_DIR}/install_shine.sh" ]; then
+		IMAGE_HAS_SHINE=1
+	fi
+
+	if [ -f "${IMAGE_DIR}/install_eadesigner.sh" ]; then
+		IMAGE_HAS_EAD=1
+	fi
+
+	if [ -f "${IMAGE_DIR}/install_hsa.sh" ]; then
+		IMAGE_HAS_SA=1
+	fi
+
+	if [ -f "${IMAGE_DIR}/install_sdi.sh" ]; then
+		IMAGE_HAS_SDI=1
+	fi
+
+	if [ -d "${IMAGE_DIR}/${DATA_UNITS_DIR}/${DPA_DIR}" ]; then
+		IMAGE_HAS_DPA=1
+	fi
+
+	if [ -f "${IMAGE_DIR}/install_eml.sh" ]; then
+		IMAGE_HAS_EML=1
+	fi
 }
 
 #
@@ -77,11 +101,10 @@ promptSID() {
 # Check what servers are installed and running
 #
 checkServer() {
-	count=`su -l ${SYSTEM_ADMIN} -c "HDB info | grep hdbnameserver | wc -l"`
-	if [ "$count" -gt "2" ]; then
+	local hdbinfo_output=$(su -l ${SYSTEM_ADMIN} -c "HDB info")
+	if echo ${hdbinfo_output} | grep hdbnameserver >& /dev/null; then
 		HAS_SERVER=1
-		count=`su -l ${SYSTEM_ADMIN} -c "HDB info | grep \"/hana/shared/${SID}/xs/router\" | wc -l"`
-		if [ "$count" -gt "2" ]; then
+		if echo ${hdbinfo_output} | grep "/hana/shared/${SID}/xs/router" >& /dev/null; then
 			HAS_XSA=1
 		fi
 	else
@@ -107,6 +130,104 @@ checkXSC() {
 	SQL_OUTPUT=`trim ${SQL_OUTPUT}`
 	if [ $SQL_OUTPUT -gt 0 -a $HAS_XSA -ne 1 ]; then
 		HAS_XSC=1
+	fi
+}
+
+checkOptionalComponents() {
+	if [ -f /hana/shared/${SID}/HDB${INSTANCE}/streaming/STREAMING-2_0/bin/hdbstreamingserver ]; then
+		HAS_SA=1
+	fi
+
+	if [ -f /var/opt/.hdb/${HOST_NAME}/installations.73554900100200000209 ]; then
+		HAS_DPA=1
+	fi
+
+	if [ -e /usr/sap/${SID}/HDB${INSTANCE}/exe/plugins/eml ]; then
+		HAS_EML=1
+	fi
+
+	local hdbinfo_output=$(su -l ${SYSTEM_ADMIN} -c "HDB info")
+	if echo ${hdbinfo_output} | grep hdbdpserver >& /dev/null; then
+		HAS_SDI=1
+	fi
+
+	if [ $HAS_XSA -eq 1 ]; then
+		echo "Login to XSA services..."
+		output=`su -l ${SYSTEM_ADMIN} -c "xs login -u xsa_admin -p '${XSA_ADMIN_PWD}' -s $SPACE_NAME"`
+		if [ $? -ne 0 ]; then
+			echo "${output}"
+			echo
+			echo "Cannot login to XSA services.  Please check HANA has started and login/password are correct."
+			exit 1
+		fi
+
+		apps_output=`su -l ${SYSTEM_ADMIN} -c "xs apps"`
+		if [ $? -ne 0 ]; then
+			echo "${apps_output}"
+			echo
+			echo "Cannot list all apps in the target space."
+			exit 1
+		fi
+
+		if echo "${apps_output}" | grep ^eadesigner >& /dev/null; then
+			HAS_EAD=1
+		fi
+
+		if echo "${apps_output}" | grep ^shine >& /dev/null; then
+			HAS_SHINE=1
+		fi
+
+		if echo "${apps_output}" | grep ^sds >& /dev/null; then
+			HAS_SA=1
+		fi
+	fi
+
+	declare -a missing_opt
+	if [ ${HAS_SA} -eq 1 -a ${IMAGE_HAS_SA} -eq 0 ]; then
+		missing_opt+=("SAP HANA streaming analytics")
+	fi
+
+	if [ ${HAS_SDI} -eq 1 -a ${IMAGE_HAS_SDI} -eq 0 ]; then
+		missing_opt+=("SAP HANA smart data integration")
+	fi
+
+	if [ ${HAS_DPA} -eq 1 -a ${IMAGE_HAS_DPA} -eq 0 ]; then
+		missing_opt+=("Data Provisioning Agent")
+	fi
+
+	if [ ${HAS_SHINE} -eq 1 -a ${IMAGE_HAS_SHINE} -eq 0 ]; then
+		missing_opt+=("SAP HANA Interactive Education")
+	fi
+
+	if [ ${HAS_EAD} -eq 1 -a ${IMAGE_HAS_EAD} -eq 0 ]; then
+		missing_opt+=("SAP EA Designer")
+	fi
+
+	if [ ${HAS_EML} -eq 1 -a ${IMAGE_HAS_EML} -eq 0 ]; then
+		missing_opt+=("SAP HANA External Machine Learning Library")
+	fi
+
+	if [ ${#missing_opt[@]} -gt 0 ]; then
+		local extract_dir=`dirname ${IMAGE_DIR}`
+		echo
+		echo "Warning:"
+		echo
+		echo "Cannot upgrade following components because they are not found in installer directory \"${extract_dir}\".  These components may not work after the upgrade." | fold -w 80 -s
+		echo
+		echo "Please download and extract these component(s) to \"${extract_dir}\" and rerun ${PROG_NAME}." | fold -w 80 -s
+		echo
+		for i in "${missing_opt[@]}"; do
+			echo -e "\t- ${i}"
+		done
+		echo
+		while [ 1 ] ; do
+			read -p "Do you want to proceed without upgrading these component(s)? (Y/N) : " proceed
+			if [ "${proceed}" == "Y" -o "${proceed}" == "y" ]; then
+				break
+			elif [ "${proceed}" == "N" -o "${proceed}" == "n" ]; then
+				exit 1
+			fi
+		done
 	fi
 }
 
@@ -185,7 +306,7 @@ promptInstanceNumber() {
 promptPwd() {
 	local pwd=""
 	while [ 1 ]; do
-		read -s -p "Enter \"${1}\" password : " pwd
+		read -r -s -p "Enter \"${1}\" password : " pwd
 		if [ -z "$pwd" ]; then
 			echo
 			echo "Invalid empty password. Please re-enter."
@@ -209,13 +330,16 @@ promptPwd() {
 execSQL() {
 	local db="$2"
 	local db_lc=`echo "$2" | tr '[:upper:]' '[:lower:]'`
-	local sql="$5"
-
 	if [ "${db_lc}" == "systemdb" ]; then
 		db="SystemDB"
 	fi
-
-	SQL_OUTPUT=`su -l ${SYSTEM_ADMIN} -c "\"/usr/sap/${SID}/HDB${1}/exe/hdbsql\" -a -x -i ${1} -d ${db} -u ${3} -p \"${4}\" \"${sql}\" 2>&1"`
+	local sql="$5"
+	SQL_OUTPUT=$(su -l ${SYSTEM_ADMIN} -c "/usr/sap/${SID}/HDB${1}/exe/hdbsql -a -x -quiet 2>&1 <<-EOF
+\c -i $1 -d $db -u $3 -p $4
+$sql
+EOF
+"
+)
 	if [ $? -ne 0 ]; then
 		# Strip out password string
 		if [ -n "${4}" ]; then
@@ -262,7 +386,6 @@ printSummary() {
 	done
 }
 
-
 upgradeHXE() {
 	local status=0
 	echo "Upgrade HANA, express edition..."
@@ -280,10 +403,19 @@ EOF
 }
 
 postProcessServer() {
+	# Enable debugger in workbench
+	echo "Enable debugger in workbench..."
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') set ('debugger','enabled') = 'true' WITH RECONFIGURE;"
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') set ('httpserver','developer_mode') = 'true' WITH RECONFIGURE;"
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') set ('debugger','listenport') = '3${INSTANCE}08' WITH RECONFIGURE;"
+
+	echo "Enable statistics server..."
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') SET ('statisticsserver','active') = 'true' WITH RECONFIGURE"
 
 	# Include diserver in startup for server-only
 	if [ $HAS_XSA -eq 0 ]; then
 		# SAP_RETRIEVAL_PATH=/hana/shared/${SID}/HDB${INSTANCE}/hxehost
+		echo "Enable diserver server..."
 		if ! grep '^\[diserver\]' $SAP_RETRIEVAL_PATH/daemon.ini >& /dev/null; then
 			cat >> ${SAP_RETRIEVAL_PATH}/daemon.ini <<-EOF
 
@@ -293,15 +425,29 @@ EOF
 		fi
 	fi
 
-	# Copy change_key.sh to <hxeadm home>/bin directory
 	su -l ${SYSTEM_ADMIN} -c "mkdir -p /usr/sap/${SID}/home/bin"
+	su -l ${SYSTEM_ADMIN} -c "mkdir -p /usr/sap/${SID}/home/Downloads"
+
+	# Copy change_key.sh to <hxeadm home>/bin directory
 	su -l ${SYSTEM_ADMIN} -c "cp -p ${IMAGE_DIR}/change_key.sh /usr/sap/${SID}/home/bin"
 	su -l ${SYSTEM_ADMIN} -c "chmod 755 /usr/sap/${SID}/home/bin/change_key.sh"
 
 	# Copy hxe_gc.sh to <hxeadm home>/bin directory
-        su -l ${SYSTEM_ADMIN} -c "mkdir -p /usr/sap/${SID}/home/bin"
         su -l ${SYSTEM_ADMIN} -c "cp -p ${IMAGE_DIR}/hxe_gc.sh /usr/sap/${SID}/home/bin"
         su -l ${SYSTEM_ADMIN} -c "chmod 755 /usr/sap/${SID}/home/bin/hxe_gc.sh"
+
+	# Copy Download Manager to <hxeadm home>/bin directory
+	if [ "$PLATFORM" == "LINUX_X86_64" ]; then
+		su -l ${SYSTEM_ADMIN} -c "cp -p ${IMAGE_DIR}/HXEDownloadManager_linux.bin /usr/sap/${SID}/home/bin"
+		su -l ${SYSTEM_ADMIN} -c "chmod 755 /usr/sap/${SID}/home/bin/HXEDownloadManager_linux.bin"
+		su -l ${SYSTEM_ADMIN} -c "cp -p ${IMAGE_DIR}/HXECheckUpdate_linux.bin /usr/sap/${SID}/home/bin"
+		su -l ${SYSTEM_ADMIN} -c "chmod 755 /usr/sap/${SID}/home/bin/HXECheckUpdate_linux.bin"
+	else
+		su -l ${SYSTEM_ADMIN} -c "cp -p ${IMAGE_DIR}/HXEDownloadManager.jar /usr/sap/${SID}/home/bin"
+		su -l ${SYSTEM_ADMIN} -c "chmod 755 /usr/sap/${SID}/home/bin/HXEDownloadManager.jar"
+		su -l ${SYSTEM_ADMIN} -c "cp -p ${IMAGE_DIR}/HXECheckUpdate.jar /usr/sap/${SID}/home/bin"
+		su -l ${SYSTEM_ADMIN} -c "chmod 755 /usr/sap/${SID}/home/bin/HXECheckUpdate.jar"
+	fi
 }
 
 startTenantDB() {
@@ -333,9 +479,6 @@ EOF
 		echo "Failed to import delivery units."
 		exit 1
 	fi
-
-	echo "Enable statistics server..."
-	execSQL ${INSTANCE} SystemDB ${SYSTEM_USER} ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') SET ('statisticsserver','active') = 'true' WITH RECONFIGURE"
 }
 
 #
@@ -411,6 +554,179 @@ grantActivatedRole() {
 	fi
 }
 
+#Create role collections for webide
+createRoleCollections() {
+	echo "Create role collections for WEB_IDE..."
+
+	xs_path=/hana/shared/${SID}/xs/bin
+	export PATH=$PATH:$xs_path
+	ENV_PARAMS=`su -l ${SYSTEM_ADMIN} -c "xs env xsa-admin"`
+
+	#authentication (get token)
+	CLIENT_ID=`echo "$ENV_PARAMS" | grep "clientid" | cut -d'"' -f4`
+	CLIENT_SECRET=`echo "$ENV_PARAMS" | grep "clientsecret" | cut -d'"' -f4`
+	UAA_URL=`echo "$ENV_PARAMS" | grep "uaa-security" -m1 | cut -d'"' -f4`
+
+	if [ -z "$CLIENT_ID" -o -z "$CLIENT_SECRET" -o -z "$UAA_URL" ]; then
+		echo "Failed to get xsa-admin environment variables."
+		echo "$ENV_PARAMS"
+		exit 1
+	fi
+
+	TOKEN=`curl -s -S --max-time 300 --insecure -u ${CLIENT_ID}:${CLIENT_SECRET} --data-urlencode "password=${XSA_ADMIN_PWD}" "${UAA_URL}/oauth/token?grant_type=password&username=XSA_ADMIN" | cut -d'"' -f4`
+	if [ -z "$TOKEN" ]; then
+		echo "Failed to get token."
+		exit 1
+	fi
+
+	DEVX_DEV_RT=WebIDE_Developer
+	DEVX_DEV_RT_DESCR="Web IDE Developer"
+	DEVX_DEV_RC_DESCR="Web%20IDE%20Developer%20Role%20Collection"
+
+	DEVX_ADMIN_RT=WebIDE_Administrator
+	DEVX_ADMIN_RT_DESCR="Web IDE Administrator"
+	DEVX_ADMIN_RC_DESCR="Web%20IDE%20Administrator%20Role%20Collection"
+
+	HRTT_DEV_RT=xsac_hrtt_developer_template
+	HRTT_DEV_RT_DESCR="xsac_hrtt_developer_template"
+
+	roles=`curl -s -S --max-time 180 --insecure -H "Authorization: Bearer $TOKEN" -X GET "${UAA_URL}/sap/rest/authorization/rolecollections/DEVX_DEVELOPER/roles"`
+	if [ "$roles" == "{}" ]; then
+		devx_env=`su -l ${SYSTEM_ADMIN} -c "xs env di-core"`
+		app_name=`echo "$devx_env" | grep "xsappname" | cut -d'"' -f4`
+
+		hrtt_env=`su -l ${SYSTEM_ADMIN} -c "xs env hrtt-core"`
+		hrtt_app_name=`echo "$hrtt_env" | grep "xsappname" | cut -d'"' -f4`
+
+		devx_role="'{\"roleTemplateName\":\"$DEVX_DEV_RT\",\"roleTemplateAppId\":\"$app_name\",\"name\":\"$DEVX_DEV_RT\",\"identityZone\":\"uaa\",\"attributeList\":null,\"description\":\"$DEVX_DEV_RT_DESCR\",\"version\":\"\"}'"
+
+		devx_admin_role="'{\"roleTemplateName\":\"$DEVX_ADMIN_RT\",\"roleTemplateAppId\":\"$app_name\",\"name\":\"$DEVX_ADMIN_RT\",\"identityZone\":\"uaa\",\"attributeList\":null,\"description\":\"$DEVX_ADMIN_RT_DESCR\",\"version\":\"\"}'"
+
+		hrtt_dev_role="'{\"roleTemplateName\":\"$HRTT_DEV_RT\",\"roleTemplateAppId\":\"$hrtt_app_name\",\"name\":\"$HRTT_DEV_RT\",\"identityZone\":\"uaa\",\"attributeList\":null,\"description\":\"$HRTT_DEV_RT_DESCR\",\"version\":\"\"}'"
+
+		curl -s -S --max-time 180 --insecure -H "Authorization: Bearer $TOKEN"  -H "Content-Type: application/json" -X POST "${UAA_URL}/sap/rest/authorization/rolecollections/DEVX_DEVELOPER?description=$DEVX_DEV_RC_DESCR"
+
+		curl -s -S --max-time 180 --insecure -H "Authorization: Bearer $TOKEN"  -H "Content-Type: application/json" -X POST "${UAA_URL}/sap/rest/authorization/rolecollections/DEVX_ADMINISTRATOR?description=$DEVX_ADMIN_RC_DESCR"
+
+		my_command=`echo curl -s -S --max-time 180 --insecure -H \"Authorization: Bearer $TOKEN\"  -H \"Content-Type: application/json\" -X PUT -d $devx_role \"${UAA_URL}/sap/rest/authorization/rolecollections/DEVX_DEVELOPER/roles\"`
+		eval $my_command
+
+		my_command=`echo curl -s -S --max-time 180 --insecure -H \"Authorization: Bearer $TOKEN\"  -H \"Content-Type: application/json\" -X PUT -d $hrtt_dev_role \"${UAA_URL}/sap/rest/authorization/rolecollections/DEVX_DEVELOPER/roles\"`
+		eval $my_command
+
+		my_command=`echo curl -s -S --max-time 180 --insecure -H \"Authorization: Bearer $TOKEN\"  -H \"Content-Type: application/json\" -X PUT -d $devx_admin_role \"${UAA_URL}/sap/rest/authorization/rolecollections/DEVX_ADMINISTRATOR/roles\"`
+		eval $my_command
+	fi
+}
+
+#
+# Deploys the di-builder for webide in $DEV_SPACE_NAME space
+#
+builderDeployment() {
+        echo "Deploy di-builder for WEB_IDE in $DEV_SPACE_NAME space..."
+
+        XS_PATH=/hana/shared/${SID}/xs/bin
+
+        export PATH=$PATH:$XS_PATH
+
+        DI_CORE_URL=`su -l ${SYSTEM_ADMIN} -c "xs app --urls di-core"`
+        ENV_PARAMS=`su -l ${SYSTEM_ADMIN} -c "xs env di-core"`
+
+        #authentication (get token)
+        CLIENT_ID=`echo "$ENV_PARAMS" | grep "clientid" | cut -d'"' -f4`
+        CLIENT_SECRET=`echo "$ENV_PARAMS" | grep "clientsecret" | cut -d'"' -f4`
+        UAA_URL=`echo "$ENV_PARAMS" | grep "uaa-security" -m1 | cut -d'"' -f4`
+
+        if [ -z "$CLIENT_ID" -o -z "$CLIENT_SECRET" -o -z "$UAA_URL" ]; then
+                echo "$ENV_PARAMS"
+                echo
+                echo "Failed to get di-core environment variables."
+                exit 1
+        fi
+
+        TOKEN=`curl -s -S --max-time 300 --insecure --noproxy ${HOST_NAME} -u ${CLIENT_ID}:${CLIENT_SECRET} "${UAA_URL}/oauth/token?grant_type=password&username=XSA_ADMIN&password=${XSA_ADMIN_PWD}" | cut -d'"' -f4`
+        if [ -z "$TOKEN" ]; then
+                echo "$TOKEN"
+                echo
+                echo "Failed to get token"
+                exit 1
+        fi
+
+        #Get space id for $DEV_SPACE_NAME (And retry for 10 minutes in case di-core isn't running yet)
+        TICKER=0
+        RESPONSE_SPACE_ID_LEN=0
+        echo -n "Waiting for di-core to start..."
+        while [ $RESPONSE_SPACE_ID_LEN -ne 36 ] && [ $TICKER -lt 15 ] ; do
+                RESPONSE=$(curl -s -S --max-time 180 --insecure --noproxy $HOST_NAME -H "Accept: application/json" -H "Authorization: Bearer ${TOKEN}" $DI_CORE_URL/admin/builder/installed_builders)
+                SPACE_ID=`echo "$RESPONSE" | tr "}" "\n" | grep "spaceName\":\"$DEV_SPACE_NAME" | cut -d'"' -f12`
+                RESPONSE_SPACE_ID_LEN=${#SPACE_ID}
+                if [ $RESPONSE_SPACE_ID_LEN -ne 36 ] ; then
+                        echo -n "."
+                        sleep 60s
+                else
+                        echo
+                        echo "di-core has started"
+                fi
+                TICKER=$(($TICKER + 1))
+        done
+        if [ $RESPONSE_SPACE_ID_LEN -ne 36 ] ; then
+                echo
+                echo "$RESPONSE"
+                echo
+                echo "di-core failed to start."
+                exit 1
+        fi
+
+        echo "Deploying builder to space $DEV_SPACE_NAME with id $SPACE_ID..."
+        B_RES=$(curl -s -S --max-time 900 --insecure --noproxy $HOST_NAME -X POST -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" -d '{"force":true}' $DI_CORE_URL/admin/builder/install/$SPACE_ID)
+
+        #check that the builder deployment started
+        RES_CHECK=`echo "$B_RES" | cut -d'"' -f12`
+        if [ "$RES_CHECK" == "status" ] ; then
+                echo "Builder deployment started."
+                WORKING="true"
+        else
+                echo "$B_RES"
+                echo
+                echo "Builder deployment request failed!"
+                exit 1
+        fi
+
+        #wait for status successful (or for 5 minutes to go by)
+        echo -n "Wait for builder to deploy..."
+        TICKER=0
+        STATUS=""
+        while [ "$WORKING" == "true" ] && [ $TICKER -lt 10 ] ; do
+                sleep 60s
+                TICKER=$(($TICKER + 1))
+                S_RESPONSE=$(curl -s -S --max-time 180 --insecure --noproxy $HOST_NAME -H "Accept: application/json" -H "Authorization: Bearer ${TOKEN}" $DI_CORE_URL/admin/builder/status/$SPACE_ID)
+                STATUS=`echo "$S_RESPONSE" | cut -d'"' -f14`
+                if [ "$STATUS" == "IN_PROGRESS" ] ; then
+                        echo -n "."
+                elif [ "$STATUS" == "FAILED" ] ; then
+                        echo
+                        echo "$S_RESPONSE"
+                        echo
+                        echo "Failed to deploy builder."
+                        WORKING="false"
+                        exit 1
+                elif [ "$STATUS" == "SUCCESSFUL" ] ; then
+                        echo
+                        echo "Successfully deployed builder in space $DEV_SPACE_NAME."
+                        WORKING="false"
+                else
+                        WORKING="false"
+                fi
+        done
+        if [ "$STATUS" != "SUCCESSFUL" ] ; then
+                echo
+                echo "$S_RESPONSE"
+                echo
+                echo "Failed to deploy builder."
+                exit 1
+        fi
+}
+
 postProcessXSA() {
 	if [ $HAS_XSA -ne 1 ]; then
 		return
@@ -418,13 +734,13 @@ postProcessXSA() {
 
 	# Reduce memory footprint by storing all lob data on disk
 	echo "Reduce memory footprint by storing all lob data on disk..."
-	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER TABLE \\\"SYS_XS_RUNTIME\\\".\\\"BLOBSTORE\\\" ALTER (\\\"VALUE\\\" BLOB MEMORY THRESHOLD 0)"
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER TABLE \"SYS_XS_RUNTIME\".\"BLOBSTORE\" ALTER (\"VALUE\" BLOB MEMORY THRESHOLD 0)"
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('global.ini', 'SYSTEM') SET ('memoryobjects', 'unload_upper_bound') = '838860800' with reconfigure"
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('global.ini', 'SYSTEM') SET ('memoryobjects', 'unused_retention_period' ) = '60' with reconfigure"
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('global.ini', 'SYSTEM') SET ('memoryobjects', 'unused_retention_period_check_interval' ) = '60' with reconfigure"
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('global.ini', 'SYSTEM') SET ('memorymanager', 'gc_unused_memory_threshold_abs' ) = '1024' with reconfigure"
-	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "DROP FULLTEXT INDEX _sys_repo.\\\"FTI_ACTIVE_OBJECT_CDATA\\\""
-	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "CREATE FULLTEXT INDEX _sys_repo.\\\"FTI_ACTIVE_OBJECT_CDATA\\\" ON \\\"_SYS_REPO\\\".\\\"ACTIVE_OBJECT\\\"(\\\"CDATA\\\" ) LANGUAGE DETECTION ('EN') ASYNC PHRASE INDEX RATIO 0.0 SEARCH ONLY OFF FAST PREPROCESS OFF TOKEN SEPARATORS '/;,.:-_()[]<>!?*@+{}=\\\"&#\$~|'"
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "DROP FULLTEXT INDEX _sys_repo.\"FTI_ACTIVE_OBJECT_CDATA\""
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "CREATE FULLTEXT INDEX _sys_repo.\"FTI_ACTIVE_OBJECT_CDATA\" ON \"_SYS_REPO\".\"ACTIVE_OBJECT\"(\"CDATA\" ) LANGUAGE DETECTION ('EN') ASYNC PHRASE INDEX RATIO 0.0 SEARCH ONLY OFF FAST PREPROCESS OFF TOKEN SEPARATORS '/;,.:-_()[]<>!?*@+{}=\"&#\$~|'"
 
 	# Enable repository
 	echo "Enable repository..."
@@ -435,13 +751,75 @@ postProcessXSA() {
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('indexserver.ini', 'SYSTEM') SET ('session', 'idle_connection_timeout') = '60' WITH RECONFIGURE;"
 
 	echo "Login to XSA services..."
-	output=`su -l ${SYSTEM_ADMIN} -c "xs login -u xsa_admin -p \"${XSA_ADMIN_PWD}\" -s $SPACE_NAME"`
+	output=`su -l ${SYSTEM_ADMIN} -c "xs login -u xsa_admin -p '${XSA_ADMIN_PWD}' -s $SPACE_NAME"`
 	if [ $? -ne 0 ]; then
 		echo "${output}"
 		echo
 		echo "Cannot login to XSA services.  Please check HANA has started and login/password are correct."
 		exit 1
 	fi
+
+	#Create role collections for webide
+	createRoleCollections
+	echo
+
+	 #Creating xsa_dev user and assigning role collection
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "SELECT COUNT(*) FROM USERS WHERE USER_NAME='XSA_DEV'"
+	SQL_OUTPUT=`trim ${SQL_OUTPUT}`
+	if [ "$SQL_OUTPUT" != "1" ]; then
+		echo "Create XSA_DEV user..."
+		execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "CREATE USER XSA_DEV PASSWORD \"${XSA_ADMIN_PWD}\" NO FORCE_FIRST_PASSWORD_CHANGE SET PARAMETER XS_RC_XS_CONTROLLER_USER = 'XS_CONTROLLER_USER' , XS_RC_DEVX_DEVELOPER = 'DEVX_DEVELOPER', XS_RC_XS_AUTHORIZATION_ADMIN = 'XS_AUTHORIZATION_ADMIN'"
+	fi
+
+	#altering the xsa_admin user to assign the role collection
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER USER XSA_ADMIN SET PARAMETER XS_RC_XS_CONTROLLER_USER = 'XS_CONTROLLER_USER', XS_RC_DEVX_ADMIN = 'DEVX_ADMINISTRATOR', XS_RC_XS_AUTHORIZATION_ADMIN = 'XS_AUTHORIZATION_ADMIN'"
+
+	echo "Set space roles in \"$SPACE_NAME\" space in \"HANAExpress\" org..."
+	space_users=`su -l ${SYSTEM_ADMIN} -c "xs space-users HANAExpress ${SPACE_NAME}"`
+	if [ $? -ne 0 ]; then
+		echo "$space_users"
+		echo "Cannot get space users."
+		exit 1
+	fi
+	if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_ADMIN >& /dev/null; then
+		output=`su -l ${SYSTEM_ADMIN} -c "xs set-space-role XSA_ADMIN HANAExpress $SPACE_NAME SpaceDeveloper"`
+		if [ $? -ne 0 ]; then
+			echo "${output}"
+			exit 1
+		fi
+	fi
+	if ! echo "$space_users" | grep ^SpaceAuditor | grep XSA_DEV >& /dev/null; then
+		output=`su -l ${SYSTEM_ADMIN} -c "xs set-space-role XSA_DEV HANAExpress $SPACE_NAME SpaceAuditor"`
+		if [ $? -ne 0 ]; then
+			echo "${output}"
+			exit 1
+		fi
+	fi
+
+	echo "Set space roles in \"$DEV_SPACE_NAME\" space in \"HANAExpress\" org..."
+	space_users=`su -l ${SYSTEM_ADMIN} -c "xs space-users HANAExpress ${DEV_SPACE_NAME}"`
+	if [ $? -ne 0 ]; then
+		echo "$space_users"
+		echo "Cannot get space users."
+		exit 1
+	fi
+	if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_ADMIN >& /dev/null; then
+		output=`su -l ${SYSTEM_ADMIN} -c "xs set-space-role XSA_ADMIN HANAExpress $DEV_SPACE_NAME SpaceDeveloper"`
+		if [ $? -ne 0 ]; then
+			echo "${output}"
+			exit 1
+		fi
+	fi
+	if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_DEV >& /dev/null; then
+		output=`su -l ${SYSTEM_ADMIN} -c "xs set-space-role XSA_DEV HANAExpress $DEV_SPACE_NAME SpaceDeveloper"`
+		if [ $? -ne 0 ]; then
+			echo "${output}"
+			exit 1
+		fi
+	fi
+
+	#Deploys the di-builder for webide
+	builderDeployment
 
 	# Stop apps
 	stopApps
@@ -450,7 +828,6 @@ postProcessXSA() {
 	cleanupApps
 
 	# Copy create_tenantdb.sh to <hxeadm home>/bin directory
-	su -l ${SYSTEM_ADMIN} -c "mkdir -p /usr/sap/${SID}/home/bin"
 	su -l ${SYSTEM_ADMIN} -c "cp -p ${IMAGE_DIR}/create_tenantdb.sh /usr/sap/${SID}/home/bin"
 	su -l ${SYSTEM_ADMIN} -c "chmod 755 /usr/sap/${SID}/home/bin/create_tenantdb.sh"
 
@@ -499,15 +876,10 @@ processMTA() {
 }
 
 #
-# Cleanup apps
-# This function removes any apps that crashed or instances of apps that were started.
-#
-cleanupApps() {
-	echo "Cleanup stopped applications..."
-
-	# Get apps
-	local apps=`su -l hxeadm -c "xs apps | awk '{if ((NR>6) && (length(\\$0) > 1)) {print \\$1}}'"`
-	for appName in $apps; do
+# Cleans up each individual app by removing its crashed and stopped apps
+# arg1 - multiline list of app names
+cleanupEachApp() {
+	while read appName; do
 		echo "Cleaning up instances of $appName pass 1..."
 		#Clean up the crashed instances
 		output=`su -l ${SYSTEM_ADMIN} -c "xs delete-app-instances $appName --crashed -f"`
@@ -528,6 +900,27 @@ cleanupApps() {
 			exit 1
 		fi
 	done
+}
+
+#
+# Cleanup apps
+# This function removes any apps that crashed or instances of apps that were started.
+cleanupApps() {
+	echo "Cleanup stopped applications..."
+	output=`su -l ${SYSTEM_ADMIN} -c "xs login -u xsa_admin -p ${XSA_ADMIN_PWD} -s SAP"`
+	if [ $? -ne 0 ]; then
+		echo "${output}"
+		echo
+		echo "Cannot login to XSA services.  Please check HANA has started and login/password are correct."
+		exit 1
+	fi
+
+	#loop through xs apps and perform a function call on each.
+	su -l ${SYSTEM_ADMIN} -c "xs apps" | \
+	#xs apps returns 6 lines of header
+	awk '{if ((NR>6) && (length($0) > 1)) {print $1}}' | \
+	# Call the cleanup command with the list of app names
+	cleanupEachApp
 }
 
 #
@@ -560,12 +953,40 @@ stopApps() {
 		exit 1
 	fi
 
+
 #	echo "Stopping sap-portal-services..."
 #	output=`xs stop sap-portal-services`
 #	if [ $? -ne 0 ]; then
 #		echo "${output}"
 #		exit 1
 #	fi
+}
+
+#
+# Wait for apps to start
+#
+waitAppsStarted() {
+	if [ $HAS_XSA -ne 1 ]; then
+		return
+	fi
+
+	echo "Login to XSA services..."
+	output=`su -l ${SYSTEM_ADMIN} -c "xs login -u xsa_admin -p '${XSA_ADMIN_PWD}' -s ${SPACE_NAME}"`
+	if [ $? -ne 0 ]; then
+		echo "${output}"
+		echo
+		echo "Cannot login to XSA services.  Please check HANA has started and login/password are correct."
+		exit 1
+	fi
+
+	echo "Check/Wait for all apps to start.  This may take a while..."
+	output=`su -l ${SYSTEM_ADMIN} -c "xs wait-for-apps --timeout 3600 --all-instances --space ${SPACE_NAME}"`
+	if [ $? -ne 0 ]; then
+		echo "${output}"
+		echo
+		echo "Waiting for apps to start has timeout."
+		exit 1
+	fi
 }
 
 #
@@ -588,6 +1009,8 @@ removePostInstallFiles() {
 collectGarbage() {
 	echo "Do garbage collection..."
 
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM RECLAIM LOG"
+	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM RECLAIM DATAVOLUME 105 DEFRAGMENT"
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM RECLAIM VERSION SPACE"
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM SAVEPOINT"
 	execSQL ${INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM CLEAR SQL PLAN CACHE"
@@ -596,7 +1019,7 @@ collectGarbage() {
 	if [ $HAS_XSA -eq 1 ]; then
 		server_list="hdbnameserver hdbindexserver hdbcompileserver hdbpreprocessor hdbdiserver hdbwebdispatcher"
 	fi
-	hdbinfo_output=`su -l ${SYSTEM_ADMIN} -c "HDB info"`
+	local hdbinfo_output=$(su -l ${SYSTEM_ADMIN} -c "HDB info")
 	for server in $server_list; do
 		if echo $hdbinfo_output | grep "${server}" >& /dev/null; then
 			echo "Collect garbage on \"${server}\"..."
@@ -646,19 +1069,23 @@ checkLocalOSUserPwd() {
 
 	local shadow_hash=$(grep "^$user" /etc/shadow | cut -d':' -f2)
 	if [ -n "$shadow_hash" ]; then
-		local algo=$(echo $shadow_hash | cut -d'$' -f2)
-		local salt=$(echo $shadow_hash | cut -d'$' -f3)
-		local allsalt="\$${algo}\$${salt}\$"
-		local genpass=`python <<EOF
+		if [[ ! "$shadow_hash" =~ \* && ! "$shadow_hash" =~ \! ]]; then
+			local algo=$(echo $shadow_hash | cut -d'$' -f2)
+			local salt=$(echo $shadow_hash | cut -d'$' -f3)
+			local allsalt="\$${algo}\$${salt}\$"
+			local genpass=`python <<EOF
 import crypt,sys
 print crypt.crypt("$passwd", "$allsalt")
 EOF`
-		if [ "$genpass" == "$shadow_hash" ]; then
-			return 0
+			if [ "$genpass" == "$shadow_hash" ]; then
+				return 0
+			else
+				echo
+				echo "Invalid password."
+				echo
+			fi
 		else
-			echo
-			echo "Invalid password."
-			echo
+			return 0
 		fi
 	else
 		echo
@@ -731,8 +1158,11 @@ machine=`uname -m | tr '[:upper:]' '[:lower:]'`
 if [[ "$os" =~ linux ]]; then
 	if [ "$machine" == "x86_64" ] || [ "$machine" == "amd64" ] || [ "$machine" == "i386" ] || [ "$machine" == "i686" ]; then
 		PLATFORM="LINUX_X86_64"
+		PLATFORM_XSA_RT="LINUX_X86_64"
+		PLATFORM_DPA="LIN_X86_64"
 	elif [ "$machine" == "ppc64le" ]; then
 		PLATFORM="LINUX_PPC64LE"
+		PLATFORM_XSA_RT="LINUX_PPC64LE"
 	fi
 fi
 IMAGE_DIR="$PROG_DIR"
@@ -744,13 +1174,30 @@ XSA_RT_COMP_DIR="XSA_RT_10_${PLATFORM}"
 XSA_CONTENT_COMP_DIR="XSA_CONTENT_10"
 HANA_COCKPIT_COMP_DIR="HANA_COCKPIT_20"
 WEB_IDE_COMP_DIR="XSAC_SAP_WEB_IDE_20"
-SA_DIR="HANA_STREAMING_4H20_01_HXE"
+SA_DIR="HANA_STREAMING_4H20_02_HXE"
+SDI_DIR="SAP_HANA_SDI_20"
+DPA_DIR="HANA_DP_AGENT_20_${PLATFORM_DPA}"
+EML_DIR="HDB_EML_AFL_10_${PLATFORM}"
 IMAGE_HAS_XSA=0
+IMAGE_HAS_SA=0
+IMAGE_HAS_SDI=0
+IMAGE_HAS_DPA=0
+IMAGE_HAS_SHINE=0
+IMAGE_HAS_EAD=0
+IMAGE_HAS_EML=0
+
 OLD_VERSION=""
 
 HAS_SERVER=0
 HAS_XSC=0
 HAS_XSA=0
+HAS_SA=0
+HAS_SDI=0
+HAS_DPA=0
+HAS_SHINE=0
+HAS_EAD=0
+HAS_EML=0
+
 SID="HXE"
 INSTANCE="90"
 
@@ -763,6 +1210,7 @@ SYSTEM_PWD=""
 XSA_ADMIN_PWD=""
 
 SPACE_NAME="SAP"
+DEV_SPACE_NAME="development"
 
 DATE=$(date +"%Y-%m-%d_%H.%M.%S")
 LOG_FILE="/var/tmp/hxe_upgrade_${DATE}.log"
@@ -796,9 +1244,9 @@ checkServer
 
 if [ $HAS_XSA -eq 1 -a $IMAGE_HAS_XSA -ne 1 ]; then
 	echo
-	echo "Cannot do upgrade.  Your installation has XS Advanced components.  However, the HANA, express edition image in "${IMAGE_DIR}" does not." | fold -w 80 -s
+	echo "Cannot do upgrade.  Your installation has XS Advanced (XSA).  However, the HANA, express edition installer image in "${IMAGE_DIR}" does not have XSA." | fold -w 80 -s
 	echo
-	echo "Please download and extract hxexsa.tgz to `dirname ${IMAGE_DIR}`." | fold -w 80 -s
+	echo "Please download and extract hxexsa.tgz to \"`dirname ${IMAGE_DIR}`\" and rerun ${PROG_NAME}." | fold -w 80 -s
 	echo
 	exit 1
 fi
@@ -821,6 +1269,10 @@ if [ $HAS_XSA -eq 1 ]; then
 	done
 fi
 
+HOST_NAME=`su -l $SYSTEM_ADMIN -c 'basename $SAP_RETRIEVAL_PATH'`
+
+checkOptionalComponents
+
 printSummary >& >(tee -a "$LOG_FILE")
 
 # Capture setup output to log file
@@ -841,6 +1293,8 @@ fi
 
 startTenantDB
 
+waitAppsStarted
+
 postProcessServer
 
 postProcessXSA
@@ -849,22 +1303,22 @@ grantActivatedRole
 
 removePostInstallFiles
 
-echo "Restarting HDB..."
-output=`su -l ${SYSTEM_ADMIN} -c "HDB stop"`
-if [ $? -ne 0 ]; then
-	echo "$output"
-	echo "Failed to stop HDB."
-	exit 1
-fi
-output=`su -l ${SYSTEM_ADMIN} -c "HDB start"`
-if [ $? -ne 0 ]; then
-	echo "$output"
-	echo "Failed to start HDB."
-	exit 1
-fi
-
 collectGarbage
 
 updateVersionFile
 
 echo "HDB is successfully upgraded."
+
+if [ ${HAS_SDI} -eq 1 -a ${IMAGE_HAS_SDI} -eq 1 ] || [ ${HAS_SHINE} -eq 1 -a ${IMAGE_HAS_SHINE} -eq 1 ] || [ ${HAS_DPA} -eq 1 -a ${IMAGE_HAS_DPA} -eq 1 ]; then
+	echo
+	echo "Please run following to re-install:"
+	if [ ${HAS_SDI} -eq 1 -a ${IMAGE_HAS_SDI} -eq 1 ]; then
+		echo "SAP HANA smart data integration - ${IMAGE_DIR}/install_sdi.sh"
+	fi
+	if [ ${HAS_SHINE} -eq 1 -a ${IMAGE_HAS_SHINE} -eq 1 ]; then
+		echo "SAP HANA Interactive Education - ${IMAGE_DIR}/install_shine.sh"
+	fi
+	if [ ${HAS_DPA} -eq 1 -a ${IMAGE_HAS_DPA} -eq 1 ]; then
+		echo "Data Provisioning Agent - ${IMAGE_DIR}/${DATA_UNITS_DIR}/${DPA_DIR}/hdbinst"
+	fi
+fi

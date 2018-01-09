@@ -13,6 +13,15 @@ checkRootUser() {
 	fi
 }
 
+# Check if XSA is compatible with the installed HANA, express edition version
+checkCompatibleXSAVersion() {
+	hxe_version=$(getINIFileValue /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt "hxe_version" "HANA, express edition")
+	if [ "${BUILD_VERSION}" != "${hxe_version}" ]; then
+		echo "Cannot install XSA.  This XSA version is not compatible with your installed HANA, express edition version."
+		exit 1
+	fi
+}
+
 # Prompt HANA, express edition installer image root directory
 promptImageRootDir() {
 	# Check default location has valid image
@@ -82,8 +91,16 @@ promptImageRootDir() {
 		IMAGE_HAS_EAD=1
         fi
 
-	if [ -f "${IMAGE_DIR}/install_sa.sh" ]; then
+	if [ -f "${IMAGE_DIR}/install_hsa.sh" ]; then
 		IMAGE_HAS_SA=1
+	fi
+
+	if [ -f "${IMAGE_DIR}/install_sdi.sh" ]; then
+		IMAGE_HAS_SDI=1
+	fi
+
+	if [ -d "${IMAGE_DIR}/${DATA_UNITS_DIR}/${DPA_DIR}" ]; then
+		IMAGE_HAS_DPA=1
 	fi
 
 	if [ -f "${IMAGE_DIR}/install_eml.sh" ]; then
@@ -93,7 +110,7 @@ promptImageRootDir() {
 
 #Prompt for adding XSA
 promptAddXSA(){
-	echo "Detected server instance ${SID} without XSA"
+	echo "Detected server instance ${SID} without Extended Services + apps (XSA)"
 	while [ 1 ] ; do
 		read -p "Do you want to install XSA? (Y/N): " tmp
 		if [ "$tmp" == "Y" -o "$tmp" == "y" ]; then
@@ -196,6 +213,7 @@ searchSID() {
 		HAS_XSA=1
 	fi
 }
+
 #
 # Prompt HANA instance number
 #
@@ -230,7 +248,7 @@ promptInstance() {
 #
 promptPwd() {
 	local pwd=""
-	read -s -p "Enter \"${1}\" password : " pwd
+	read -r -s -p "Enter \"${1}\" password : " pwd
 	echo
 	eval $2=\$pwd
 }
@@ -247,17 +265,18 @@ promptNewPwd() {
 	echo
 	echo "Password must be at least 8 characters in length.  It must contain at least"
 	echo "1 uppercase letter, 1 lowercase letter, and 1 number.  Special characters"
-	echo "are allowed, except \\ (backslash), \" (double quotes), and \` (backtick)."
+	echo "are allowed, except \\ (backslash), ' (single quote), \" (double quotes),"
+	echo "\` (backtick), and \$ (dollar sign)."
 	echo
 	while [ 1 ] ; do
-		read -s -p "Enter ${1} password: " pwd
+		read -r -s -p "Enter ${1} password: " pwd
 		echo
 
 		if ! isValidPassword $pwd; then
 			continue
 		fi
 
-		read -s -p "Confirm \"${1}\" password: " confirm_pwd
+		read -r -s -p "Confirm \"${1}\" password: " confirm_pwd
 		echo
 		if [ "${pwd}" != "${confirm_pwd}" ]; then
 			echo ""
@@ -280,12 +299,16 @@ promptNewPwd() {
 promptProxyInfo() {
 	getSystemHTTPProxy
 
+	local prompt_msg="Do you need to use proxy server to access the internet? [N] : "
+	if [ -n "$SYSTEM_PROXY_HOST" ]; then
+		prompt_msg="Do you need to use proxy server to access the internet? [Y] : "
+	fi
 	while [ 1 ] ; do
-		read -p "Do you need to use proxy server to access the internet? (Y/N): " tmp
-		if [ "$tmp" == "Y" -o "$tmp" == "y" ]; then
+		read -p "$prompt_msg" tmp
+		if [ "$tmp" == "Y" -o "$tmp" == "y" ] || [ -z "$tmp" -a -n "$SYSTEM_PROXY_HOST" ]; then
 			SETUP_PROXY=1
 			break
-		elif [ "$tmp" == "N" -o "$tmp" == "n" ]; then
+		elif [ "$tmp" == "N" -o "$tmp" == "n" ] || [ -z "$tmp" -a -z "$SYSTEM_PROXY_HOST" ]; then
 			SETUP_PROXY=0
 			echo
 			return
@@ -341,6 +364,7 @@ promptProxyInfo() {
 		NO_PROXY_HOST="$SYSTEM_NO_PROXY_HOST"
 	else
 		NO_PROXY_HOST="$tmp"
+		NO_PROXY_HOST="$(addLocalHostToNoProxy "$NO_PROXY_HOST")"
 	fi
 
 	echo
@@ -388,7 +412,6 @@ promptInstallEADesigner() {
 	echo
 }
 
-
 #
 # Prompt to install SA
 #
@@ -432,6 +455,170 @@ promptInstallSA() {
 	fi
 
 	echo
+}
+
+#
+# Prompt to install SDI
+#
+promptInstallSDI() {
+	echo "SAP HANA smart data integration provides functionality to access source data, and provision, replicate, and transform that data in SAP HANA on-premise or in the cloud." | fold -w 80 -s
+
+	while [ 1 ] ; do
+		read -p "Install SAP HANA smart data integration? (Y/N) : " proceed
+		if [ "${proceed}" == "Y" -o "${proceed}" == "y" ]; then
+			INSTALL_SDI=1
+			break
+		elif [ "${proceed}" == "N" -o "${proceed}" == "n" ]; then
+			INSTALL_SDI=0
+			break
+		fi
+	done
+
+	echo
+
+	if [ $INSTALL_SDI -eq 1 ]; then
+		local db_name=""
+		if [ -z "$SDI_TENANT_DB" ]; then
+			SDI_TENANT_DB="$SID"
+		fi
+		while [ 1 ]; do
+			read -p "Enter name of tenant database to add smart data integration [${SDI_TENANT_DB}]: " db_name
+			if [ -z "$db_name" ]; then
+				db_name="$SDI_TENANT_DB"
+			fi
+			local tmp=`echo $db_name | tr '[:upper:]' '[:lower:]'`
+			if [ "$tmp" == "systemdb" ]; then
+				echo
+				echo "SystemDB database not supported. Only applicable to user databases."
+				echo
+			else
+				SDI_TENANT_DB="$db_name"
+				break;
+			fi
+		done
+	fi
+
+	echo
+}
+
+#
+# Prompt to install DP Agent
+#
+promptInstallDPA() {
+	echo "The Data Provisioning Agent (DP Agent) provides secure connectivity between the SAP HANA database and your on-premise, adapter-based sources." | fold -w 80 -s
+
+	while [ 1 ] ; do
+		read -p "Install DP Agent? (Y/N) : " proceed
+		if [ "${proceed}" == "Y" -o "${proceed}" == "y" ]; then
+			INSTALL_DPA=1
+			break
+		elif [ "${proceed}" == "N" -o "${proceed}" == "n" ]; then
+			INSTALL_DPA=0
+			break
+		fi
+	done
+
+	echo
+
+	if [ $INSTALL_DPA -eq 1 ]; then
+		#  Agent installation path
+		local install_path=""
+		read -p "Enter DP Agent installation path [${DPA_INSTALL_PATH}]: " install_path
+		if [ -n "$install_path" ]; then
+			DPA_INSTALL_PATH="$install_path"
+		fi
+		echo
+
+		# User name for Agent service
+		local agent_user=""
+		if [ -z "$DPA_USER" ]; then
+			DPA_USER=$(/usr/bin/logname)
+			if [ $? -ne 0 ]; then
+				DPA_USER=""
+			fi
+		fi
+		while [ 1 ]; do
+			read -p "Enter User name for Agent service (user must exist) [${DPA_USER}]: " agent_user
+			if [ -z "$agent_user" -a -n "$DPA_USER" ]; then
+				agent_user="$DPA_USER"
+			fi
+
+			if [ -n "$agent_user" ]; then
+				if ! $(/usr/bin/id -u $agent_user >& /dev/null); then
+					echo
+					echo "User \"$agent_user\" does not exist."
+					echo
+				else
+					DPA_USER=$agent_user
+					break
+				fi
+			fi
+		done
+		echo
+
+		# agent listener port
+		local port=""
+		if [ -z "$DPA_LISTENER_PORT" ]; then
+			DPA_LISTENER_PORT=5051
+		fi
+		while ! $(isFreePort "$DPA_LISTENER_PORT"); do
+			(( DPA_LISTENER_PORT++ ))
+		done
+		while [ 1 ]; do
+			read -p "Enter agent listener port [${DPA_LISTENER_PORT}]: " port
+			if [ -z "$port" ]; then
+				port=$DPA_LISTENER_PORT
+			fi
+
+			if ! $(isValidPort "$port"); then
+				echo
+				echo "\"$port\" is not a valid port number."
+				echo "Enter number between 1 and 65535."
+				echo
+			elif ! $(isFreePort "$port"); then
+				echo
+				echo "Port \"$port\" is already used.  Enter different port."
+				echo
+			else
+				DPA_LISTENER_PORT=$port
+				break
+			fi
+		done
+		echo
+
+		# agent administration port
+		if [ -z "$DPA_ADMIN_PORT" ]; then
+			DPA_ADMIN_PORT=5050
+		fi
+		while ! $(isFreePort "$DPA_ADMIN_PORT"); do
+			(( DPA_ADMIN_PORT++ ))
+		done
+		while [ 1 ]; do
+			read -p "Enter agent administration port [${DPA_ADMIN_PORT}]: " port
+			if [ -z "$port" ]; then
+				port=$DPA_ADMIN_PORT
+			fi
+
+			if ! $(isValidPort "$port"); then
+				echo
+				echo "\"$port\" is not a valid port number."
+				echo "Enter number between 1 and 65535."
+				echo
+			elif [ "$port" == "DPA_ADMIN_PORT" ]; then
+				echo
+				echo "Port \"$port\" is already specified for agent listener.  Enter different port."
+				echo
+			elif ! $(isFreePort "$DPA_ADMIN_PORT"); then
+				echo
+				echo "Port \"$port\" is already used.  Enter different port."
+				echo
+			else
+				DPA_ADMIN_PORT=$port
+				break
+			fi
+		done
+		echo
+	fi
 }
 
 #
@@ -509,13 +696,16 @@ stopTenantDB() {
 execSQL() {
 	local db="$2"
 	local db_lc=`echo "$2" | tr '[:upper:]' '[:lower:]'`
-	local sql="$5"
-
 	if [ "${db_lc}" == "systemdb" ]; then
 		db="SystemDB"
 	fi
-
-	SQL_OUTPUT=`su -l ${HXE_ADM_USER} -c "\"/usr/sap/${SID}/HDB${1}/exe/hdbsql\" -a -x -i ${1} -d ${db} -u ${3} -p \"${4}\" \"${sql}\" 2>&1"`
+	local sql="$5"
+	SQL_OUTPUT=$(su -l ${HXE_ADM_USER} -c "/usr/sap/${SID}/HDB${1}/exe/hdbsql -a -x -quiet 2>&1 <<-EOF
+\c -i $1 -d $db -u $3 -p $4
+$sql
+EOF
+"
+)
 	if [ $? -ne 0 ]; then
 		# Strip out password string
 		if [ -n "${4}" ]; then
@@ -607,6 +797,46 @@ getSystemHTTPProxy() {
 		SYSTEM_NO_PROXY_HOST="${SYSTEM_NO_PROXY_HOST%\'}"
 		SYSTEM_NO_PROXY_HOST="${SYSTEM_NO_PROXY_HOST#\'}"
 	fi
+	if [[ -n "$SYSTEM_NO_PROXY_HOST" ]]; then
+		SYSTEM_NO_PROXY_HOST="$(addLocalHostToNoProxy "$SYSTEM_NO_PROXY_HOST")"
+	fi
+}
+
+addLocalHostToNoProxy() {
+	if [ -z "$1" ]; then
+		return
+	fi
+
+	local no_ph=$1
+	local has_localhost=0
+	local has_localhost_name=0
+	local has_localhost_ip=0
+
+	IFS=',' read -ra hlist <<< "$no_ph"
+	for i in "${hlist[@]}"; do
+		tmp=$(trim "$i")
+		if [ -n "${tmp}" ]; then
+			if [[ "${tmp}" =~ [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt] ]]; then
+				has_localhost=1
+			elif echo ${tmp} | grep -i "^${HOST_NAME}$" >& /dev/null; then
+				has_localhost_name=1
+			elif [[ "$tmp" == "127.0.0.1" ]]; then
+				has_localhost_ip=1
+			fi
+		fi
+	done
+
+	if [ $has_localhost_ip -eq 0 ]; then
+		no_ph="127.0.0.1, ${no_ph}"
+	fi
+	if [ $has_localhost_name -eq 0 ]; then
+		no_ph="${HOST_NAME}, ${no_ph}"
+	fi
+	if [ $has_localhost -eq 0 ]; then
+		no_ph="localhost, ${no_ph}"
+	fi
+
+	echo ${no_ph}
 }
 
 isValidHostName() {
@@ -624,6 +854,14 @@ isValidPort() {
 	else
 		return 1
 	fi
+}
+
+isFreePort() {
+	if ! $(/bin/netstat -tulpn | grep :${1} >& /dev/null); then
+		return 0
+	fi
+
+	return 1
 }
 
 isValidPassword() {
@@ -668,6 +906,14 @@ isValidPassword() {
 		fi
 		showPolicy=1
 	fi
+	if echo "$pwd" | grep -F "'" >& /dev/null; then
+		if [ -z "$msg" ]; then
+			msg="' (single quote) not allowed"
+		else
+			msg="$msg, ' (single quote) not allowed"
+		fi
+		showPolicy=1
+	fi
 	if echo "$pwd" | grep -F '"' >& /dev/null; then
 		if [ -z "$msg" ]; then
 			msg="\" (double quotes) not allowed"
@@ -684,8 +930,17 @@ isValidPassword() {
 		fi
 		showPolicy=1
 	fi
+	if echo "$pwd" | grep -F '$' >& /dev/null; then
+		if [ -z "$msg" ]; then
+			msg="\$ (dollar sign) not allowed"
+		else
+			msg="$msg, \$ (dollar sign) not allowed"
+		fi
+		showPolicy=1
+	fi
 	if [ $showPolicy -eq 1 ]; then
-		echo "Invalid password: ${msg}."
+		echo
+		echo "Invalid password: ${msg}." | fold -w 80 -s
 		echo
 		echo "Password must meet all of the following criteria:"
 		echo "- 8 or more letters"
@@ -693,7 +948,8 @@ isValidPassword() {
 		echo "- At least 1 lowercase letter"
 		echo "- At least 1 number"
 		echo
-		echo "Special characters are optional; except \\ (backslash), \" (double quotes), and \` (backtick)."
+		echo "Special characters are optional; except \\ (backslash), ' (single quote),"
+		echo "\" (double quotes), \` (backtick), and \$ (dollar sign)."
 		echo
 		return 1
 	fi
@@ -765,6 +1021,7 @@ printSummary() {
 				echo "  Install SAP EA Designer                   : No"
 			fi
 		fi
+
 	fi
 
 	if [ ${IMAGE_HAS_SA} -eq 1 ]; then
@@ -773,6 +1030,25 @@ printSummary() {
 			echo "  Tenant database to add streaming          : ${SA_TENANT_DB}"
 		else
 			echo "  Install Streaming Analytics               : No"
+		fi
+	fi
+	if [ ${IMAGE_HAS_SDI} -eq 1 ]; then
+		if [ $INSTALL_SDI -eq 1 ]; then
+			echo "  Install SDI                               : Yes"
+			echo "  Tenant database to add SDI                : ${SDI_TENANT_DB}"
+		else
+			echo "  Install SDI                               : No"
+		fi
+	fi
+	if [ ${IMAGE_HAS_DPA} -eq 1 ]; then
+		if [ $INSTALL_DPA -eq 1 ]; then
+			echo "  Install DP Agent                          : Yes"
+			echo "  DP Agent installation path                : ${DPA_INSTALL_PATH}"
+			echo "  User name for Agent service               : ${DPA_USER}"
+			echo "  DP Agent listener port                    : ${DPA_LISTENER_PORT}"
+			echo "  DP Agent administration port              : ${DPA_ADMIN_PORT}"
+		else
+			echo "  Install DP Agent                          : No"
 		fi
 	fi
 	if [ ${IMAGE_HAS_EML} -eq 1 ];then
@@ -823,31 +1099,43 @@ EOF
 			postInstallSummary 0 "Server Installation"
 		fi
 
+		# Sleep to allow OS to catch up changes and server started
+		sleep 180s
+
 		chmod 755 /usr/sap/${SID}/home/.profile
 		sed -i "s|^if \[ -f \$HOME/\.bashrc.*|if \[ -f \$HOME/\.bashrc -a -z \"\$SAPSYSTEMNAME\" \]; then|" /usr/sap/${SID}/home/.profile
 
 		echo "Enable AFL..."
-		echo "\"/usr/sap/${SID}/HDB${INSTANCE}/exe/hdbsql\" -i ${INSTANCE} -d SystemDB -u SYSTEM -p \"${MASTER_PWD}\" \"alter system alter configuration ('indexserver.ini','SYSTEM') SET ('calcengine','llvm_lib_whitelist') = 'bfl,pal'\"" | su -l ${HXE_ADM_USER}
+		execSQL ${INSTANCE} SystemDB SYSTEM ${MASTER_PWD} "alter system alter configuration ('indexserver.ini','SYSTEM') SET ('calcengine','llvm_lib_whitelist') = 'bfl,pal'"
 
-		# Copy hxe_info.txt to /usr/sap/<SID>/SYS/global/hdb directory
-		echo "cp -p ${IMAGE_DIR}/hxe_info.txt /usr/sap/${SID}/SYS/global/hdb" | su -l ${HXE_ADM_USER}
-		echo "chmod 644 /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt" | su -l ${HXE_ADM_USER}
-		install_date=`date --utc`
-		sed -i "s/^INSTALL_DATE.*=.*/INSTALL_DATE=$install_date/" /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt
-
-		if [ "${COMPONENT}" == "server" ]; then
-			sed -i "/^XSA/d" /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt
-		fi
+		echo "mkdir -p /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
+		echo "mkdir -p /usr/sap/${SID}/home/Downloads" | su -l ${HXE_ADM_USER}
 
 		# Copy change_key.sh to <hxeadm home>/bin directory
-		echo "mkdir -p /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "cp -p ${IMAGE_DIR}/change_key.sh /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "chmod 755 /usr/sap/${SID}/home/bin/change_key.sh" | su -l ${HXE_ADM_USER}
 
 		# Copy hxe_gc.sh to <hxeadm home>/bin directory
-		echo "mkdir -p /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "cp -p ${IMAGE_DIR}/hxe_gc.sh /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "chmod 755 /usr/sap/${SID}/home/bin/hxe_gc.sh" | su -l ${HXE_ADM_USER}
+                
+		# Copy Download Manager to <hxeadm home>/bin directory
+		if [ "$PLATFORM" == "LINUX_X86_64" ]; then
+			echo "cp -p ${IMAGE_DIR}/HXEDownloadManager_linux.bin /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
+			echo "chmod 755 /usr/sap/${SID}/home/bin/HXEDownloadManager_linux.bin" | su -l ${HXE_ADM_USER}
+			echo "cp -p ${IMAGE_DIR}/HXECheckUpdate_linux.bin /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
+			echo "chmod 755 /usr/sap/${SID}/home/bin/HXECheckUpdate_linux.bin" | su -l ${HXE_ADM_USER}
+		else
+			echo "cp -p ${IMAGE_DIR}/HXEDownloadManager.jar /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
+			echo "chmod 755 /usr/sap/${SID}/home/bin/HXEDownloadManager.jar" | su -l ${HXE_ADM_USER}
+			echo "cp -p ${IMAGE_DIR}/HXECheckUpdate.jar /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
+			echo "chmod 755 /usr/sap/${SID}/home/bin/HXECheckUpdate.jar" | su -l ${HXE_ADM_USER}
+		fi
+
+		# Update Versions
+		updateVersionFile
+
+		collectGarbage
 	fi
 }
 
@@ -880,17 +1168,9 @@ EOF
 			exit 1
 		fi
 
-		echo "Enable statistics server..."
-		echo "\"/usr/sap/${SID}/HDB${INSTANCE}/exe/hdbsql\" -i ${INSTANCE} -d SystemDB -u SYSTEM -p \"${MASTER_PWD}\" \"alter system alter configuration ('nameserver.ini','SYSTEM') SET('statisticsserver','active') = 'true' with reconfigure\"" | su -l ${HXE_ADM_USER}
-
-		if [ $? -ne 0 ]; then
-		echo
-			echo "Failed to enable statistics server."
-			postInstallSummary 1 "XSC Installation"
-			appendRemainTasksStatusToPostSummary
-			exit 1
-		fi
 		postInstallSummary 0 "XSC Installation"
+
+		collectGarbage
 	fi
 }
 
@@ -915,6 +1195,7 @@ EOF
 			exit 1
 		else
 			postInstallSummary 0 "XSA Installation"
+                        HAS_XSA=1
 		fi
 
 		chmod 755 /usr/sap/${SID}/home/.profile
@@ -952,26 +1233,65 @@ EOF
 		echo "HDB start" | su -l ${HXE_ADM_USER}
 
 		# Copy create_tenantdb.sh to <hxeadm home>/bin directory
-		echo "mkdir -p /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "cp -p ${IMAGE_DIR}/create_tenantdb.sh /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "chmod 755 /usr/sap/${SID}/home/bin/create_tenantdb.sh" | su -l ${HXE_ADM_USER}
 
 		# Copy hxe_telemetry.sh to <hxeadm home>/bin directory
-		echo "mkdir -p /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "cp -p ${IMAGE_DIR}/hxe_telemetry.sh /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "chmod 755 /usr/sap/${SID}/home/bin/hxe_telemetry.sh" | su -l ${HXE_ADM_USER}
 
 		# Copy register_cockpit.sh to <hxeadm home>/bin directory
-		echo "mkdir -p /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "cp -p ${IMAGE_DIR}/register_cockpit.sh /usr/sap/${SID}/home/bin" | su -l ${HXE_ADM_USER}
 		echo "chmod 755 /usr/sap/${SID}/home/bin/register_cockpit.sh" | su -l ${HXE_ADM_USER}
-	fi
+	        
+               # Update Versions
+               updateVersionFile
+
+		collectGarbage
+        fi
+}
+
+#
+#Update Versions
+#
+updateVersionFile() {
+        local install_type=""
+        if [ -f /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt ]; then
+                install_type=$(grep ^INSTALL_TYPE /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt | cut -d'=' -f2)
+                rm -f /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt
+        fi
+
+        # Copy hxe_info.txt to /usr/sap/<SID>/SYS/global/hdb directory
+        su -l ${HXE_ADM_USER} -c "cp -p ${IMAGE_DIR}/hxe_info.txt /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt"
+        su -l ${HXE_ADM_USER} -c "chmod 644 /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt"
+
+        if [ -n "${install_type}" ]; then
+          sed -i "s/^INSTALL_TYPE*=.*/INSTALL_TYPE=$install_type/" /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt
+        fi
+
+        local install_date=`date --utc`
+        sed -i "s/^INSTALL_DATE.*=.*/INSTALL_DATE=$install_date/" /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt
+
+        if [ $HAS_XSA -ne 1 ]; then
+                sed -i "/^XSA/d" /usr/sap/${SID}/SYS/global/hdb/hxe_info.txt
+        fi
+}
+
+#
+# Do garbage collection
+#
+collectGarbage() {
+	su -l ${HXE_ADM_USER} -c "${IMAGE_DIR}/hxe_gc.sh<<-EOF
+${MASTER_PWD}
+EOF"
 }
 
 #
 # Execute hxe_optimize.sh script
 #
 execOptimized() {
+	local status=0
+
 	echo "Optimizing HDB server..."
 	if [ "${COMPONENT}" != "all" ]; then
 		su -l ${HXE_ADM_USER} -c "${IMAGE_DIR}/hxe_optimize.sh <<-EOF
@@ -1010,13 +1330,20 @@ N
 EOF"
 		fi
 	fi
-	postInstallSummary $? "HXE Optimization"
+
+	if [ $? -ne 0 ]; then
+		status=1
+	fi
+	postInstallSummary $status "HXE Optimization"
+
+	return $status
 }
 
 #
 # Install SHINE
 #
 installShine() {
+	local status=0
 	if [ "${COMPONENT}" == "all" -a $INSTALL_SHINE -eq 1 ]; then
 		echo "Install SHINE..."
 		su -l ${HXE_ADM_USER} -c "${IMAGE_DIR}/install_shine.sh <<-EOF
@@ -1027,32 +1354,42 @@ ${MASTER_PWD}
 ${MASTER_PWD}
 Y
 EOF"
-	postInstallSummary $? "Shine Installation"
+		if [ $? -ne 0 ]; then
+			status=1
+		fi
+		postInstallSummary $status "Shine Installation"
 	fi
+
+	return $status
 }
 
 #
 # Install EA Designer
 #
 installEADesigner() {
-	if [ "${COMPONENT}" == "all" -a $INSTALL_EAD -eq 1 ]; then
-		echo "Install SAP EA Designer..."
-		su -l ${HXE_ADM_USER} -c "${IMAGE_DIR}/install_eadesigner.sh <<-EOF
+        local status=0
+        if [ "${COMPONENT}" == "all" -a $INSTALL_EAD -eq 1 ]; then
+                echo "Install SAP EA Designer..."
+                su -l ${HXE_ADM_USER} -c "${IMAGE_DIR}/install_eadesigner.sh <<-EOF
 ${INSTANCE}
-${MASTER_PWD}
-${MASTER_PWD}
 ${MASTER_PWD}
 ${MASTER_PWD}
 Y
 EOF"
-	postInstallSummary $? "EA Designer Installation"
-	fi
+                if [ $? -ne 0 ]; then
+                        status=1
+                fi
+                postInstallSummary $status "EA Designer Installation"
+        fi
+
+        return $status
 }
 
 #
 # Install SA
 #
 installSA() {
+	local status=0
 	if [ $INSTALL_SA -eq 1 ]; then
 		echo "Install SAP HANA streaming analytics..."
 
@@ -1088,7 +1425,7 @@ EOF"
 				if [ $? -ne 0 ]; then
 					postInstallSummary 1 "Streaming Analytics Installation"
 					appendRemainTasksStatusToPostSummary
-					exit 1
+					return 1
 				fi
 			else
 				echo "Create tenant database ${SA_TENANT_DB}..."
@@ -1096,13 +1433,13 @@ EOF"
 				if [ $? -ne 0 ]; then
 					postInstallSummary 1 "Streaming Analytics Installation"
 					appendRemainTasksStatusToPostSummary
-					exit 1
+					return 1
 				fi
 			fi
 		fi
 
 		# Install SA
-		${IMAGE_DIR}/install_sa.sh <<-EOF
+		${IMAGE_DIR}/install_hsa.sh <<-EOF
 ${SID}
 ${INSTANCE}
 ${HOST_NAME}
@@ -1112,21 +1449,124 @@ ${SA_TENANT_DB}
 ${MASTER_PWD}
 Y
 EOF
-	postInstallSummary $? "Streaming Analytics Installation"
+		if [ $? -ne 0 ]; then
+			status=1
+		fi
+		postInstallSummary $status "Streaming Analytics Installation"
 	fi
+
+	return $status
+}
+
+#
+# Install SDI
+#
+installSDI() {
+	local status=0
+	if [ $INSTALL_SDI -eq 1 ]; then
+		echo "Install SAP HANA smart data integration..."
+
+		# Create new tenant database for SDI
+		if ! hasDatabase $SDI_TENANT_DB; then
+			if [ "${COMPONENT}" == "all" ]; then
+				if [ $SETUP_PROXY -eq 1 ]; then
+					su -l ${HXE_ADM_USER} -c "/usr/sap/${SID}/home/bin/create_tenantdb.sh <<-EOF
+${MASTER_PWD}
+XSA_ADMIN
+${MASTER_PWD}
+TEL_ADMIN
+${MASTER_PWD}
+${INSTANCE}
+${SDI_TENANT_DB}
+Y
+${PROXY_HOST}
+${PROXY_PORT}
+${NO_PROXY_HOST}
+EOF"
+				else
+					su -l ${HXE_ADM_USER} -c "/usr/sap/${SID}/home/bin/create_tenantdb.sh <<-EOF
+${MASTER_PWD}
+XSA_ADMIN
+${MASTER_PWD}
+TEL_ADMIN
+${MASTER_PWD}
+${INSTANCE}
+${SDI_TENANT_DB}
+N
+EOF"
+				fi
+				if [ $? -ne 0 ]; then
+					postInstallSummary 1 "SDI Installation"
+					appendRemainTasksStatusToPostSummary
+					return 1
+				fi
+			else
+				echo "Create tenant database ${SDI_TENANT_DB}..."
+				execSQL ${INSTANCE} SystemDB SYSTEM ${MASTER_PWD} "CREATE DATABASE ${SDI_TENANT_DB} SYSTEM USER PASSWORD \"${MASTER_PWD}\""
+				if [ $? -ne 0 ]; then
+					postInstallSummary 1 "SDI Installation"
+					appendRemainTasksStatusToPostSummary
+					return 1
+				fi
+			fi
+		fi
+
+		# Install SDI
+		su -l ${HXE_ADM_USER} -c "${IMAGE_DIR}/install_sdi.sh <<-EOF
+${INSTANCE}
+${HOST_NAME}
+${MASTER_PWD}
+${SDI_TENANT_DB}
+${MASTER_PWD}
+Y
+EOF"
+		if [ $? -ne 0 ]; then
+			status=1
+		fi
+		postInstallSummary $status "SAP HANA smart data integration Installation"
+	fi
+
+	return $status
+}
+
+#
+# Install DP Agent
+#
+installDPA() {
+	local status=0
+	if [ $INSTALL_DPA -eq 1 ]; then
+		echo "Install DP Agent..."
+
+		"${IMAGE_DIR}/${DATA_UNITS_DIR}/${DPA_DIR}/hdbinst" --agent_admin_port $DPA_ADMIN_PORT --agent_listener_port $DPA_LISTENER_PORT --path "$DPA_INSTALL_PATH" --user_id $DPA_USER <<-EOF
+
+
+EOF
+		if [ $? -ne 0 ]; then
+			status=1
+		fi
+		postInstallSummary $status "DP Agent Installation"
+	fi
+
+	return $status
 }
 
 #
 # Install SAP HANA External Machine Learning Library
 #
 installEML() {
+	local status=0
 	if [ $INSTALL_EML -eq 1 ]; then
 		echo "Install SAP HANA External Machine Learning Library..."
 		su -l ${HXE_ADM_USER} -c "${IMAGE_DIR}/install_eml.sh <<-EOF
 Y
 EOF"
-		postInstallSummary $? "EML Installation"
+		if [ $? -ne 0 ]; then
+			status=1
+		fi
+		postInstallSummary $status "EML Installation"
 	fi
+
+	return $status
 }
 
 #
@@ -1172,6 +1612,14 @@ appendRemainTasksStatusToPostSummary()
 				SUMMARY+="Streaming Analytics Installation...(NOT STARTED)\n"
 		fi
 
+		if [[ ( $SUMMARY != *"SAP HANA smart data integration Installation"* ) && ( $INSTALL_SDI -eq 1 ) ]]; then
+			SUMMARY+="SAP HANA smart data integration Installation...(NOT STARTED)\n"
+		fi
+
+		if [[ ( $SUMMARY != *"DP Agent"* ) && ( $INSTALL_DPA -eq 1 ) ]]; then
+			SUMMARY+="DP Agent (NOT STARTED)\n"
+		fi
+
 		if [[ ( $SUMMARY != *"EML Installation"* ) && ( $INSTALL_EML -eq 1 ) ]]; then
 				SUMMARY+="EML Installation...(NOT STARTED)\n"
 		fi
@@ -1200,6 +1648,14 @@ trim()
 	echo "$trimmed"
 }
 
+# Get value from INI file
+# $1 - init file
+# $2 - [section] name
+# $3 - property name
+getINIFileValue() {
+	sed -nr "/^\[$2\]/ { :l /^$3[ ]*=/ { s/.*=[ ]*//; p; q;}; n; b l;}" $1
+}
+
 #########################################################
 # Main
 #########################################################
@@ -1210,6 +1666,7 @@ if [[ "$os" =~ linux ]]; then
 	if [ "$machine" == "x86_64" ] || [ "$machine" == "amd64" ] || [ "$machine" == "i386" ] || [ "$machine" == "i686" ]; then
 		PLATFORM="LINUX_X86_64"
 		PLATFORM_XSA_RT="LINUX_X86_64"
+		PLATFORM_DPA="LIN_X86_64"
 	elif [ "$machine" == "ppc64le" ]; then
 		PLATFORM="LINUX_PPC64LE"
 		PLATFORM_XSA_RT="LINUX_PPC64LE"
@@ -1223,14 +1680,14 @@ XSA_RT_COMP_DIR="XSA_RT_10_${PLATFORM_XSA_RT}"
 XSA_CONTENT_COMP_DIR="XSA_CONTENT_10"
 HANA_COCKPIT_COMP_DIR="HANA_COCKPIT_20"
 WEB_IDE_COMP_DIR="XSAC_SAP_WEB_IDE_20"
-SA_DIR="HANA_STREAMING_4H20_01_HXE"
+WEB_IDE_ZIP_FILE="XSACSAPWEBIDE02_4.zip"
+WEB_IDE_EXT_FILE="sap-xsac-devx-4.2.21-hxe.mtaext"
+SA_DIR="HANA_STREAMING_4H20_02_HXE"
+SDI_DIR="SAP_HANA_SDI_20"
+DPA_DIR="HANA_DP_AGENT_20_${PLATFORM_DPA}"
 EML_DIR="HDB_EML_AFL_10_${PLATFORM}"
-
-WEB_IDE_ZIP_FILE="XSACSAPWEBIDE02_0.zip"
-WEB_IDE_EXT_FILE="sap-xsac-devx-4.2.14-hxe.mtaext"
-
-HANA_COCKPIT_ZIP_FILE="XSACCOCKPIT03_7.zip"
-HANA_COCKPIT_MTAR_FILE="sap-xsac-cockpit-2.3.7.mtar"
+HANA_COCKPIT_ZIP_FILE="XSACCOCKPIT04_11.zip"
+BUILD_VERSION="2.00.022.00.20171211.1"
 HAS_SERVER=0
 HAS_XSA=0
 ADD_XSA=0
@@ -1249,6 +1706,8 @@ IMAGE_DIR="${PROG_DIR}/${HXE_DIR}"
 IMAGE_HAS_SERVER=0
 IMAGE_HAS_XSA=0
 IMAGE_HAS_SA=0
+IMAGE_HAS_SDI=0
+IMAGE_HAS_DPA=0
 IMAGE_HAS_SHINE=0
 IMAGE_HAS_EAD=0
 IMAGE_HAS_EML=0
@@ -1266,8 +1725,16 @@ HDBLCM_ARGS=()
 INSTALL_SHINE=0
 INSTALL_EAD=0
 INSTALL_SA=0
+INSTALL_SDI=0
+INSTALL_DPA=0
 INSTALL_EML=0
 SA_TENANT_DB=""
+SDI_TENANT_DB=""
+
+DPA_INSTALL_PATH="/usr/sap/dataprovagent"
+DPA_USER=""
+DPA_LISTENER_PORT=""
+DPA_ADMIN_PORT=""
 
 BATCH_MODE=0
 DO_NOT_REGISTER_RESOURCE=0
@@ -1289,7 +1756,7 @@ fi
 # Parse argument
 #
 if [ $# -gt 0 ]; then
-	PARSED_OPTIONS=`getopt -n "$PROG_NAME" -a -o bi: --long hdblcm_cfg:,hostname:,sa_db:,sid:,no_reg -- "$@"`
+	PARSED_OPTIONS=`getopt -n "$PROG_NAME" -a -o bi: --long hdblcm_cfg:,hostname:,sa_db:,sid:,no_reg,dpa_install_path:,dpa_user:,dpa_listener_port:,dpa_admin_port: -- "$@"`
 	if [ $? -ne 0 -o "$#" -eq 0 ]; then
 		exit 1
 	fi
@@ -1341,6 +1808,9 @@ if [ $# -gt 0 ]; then
 		-sa_db|--sa_db)
 			SA_TENANT_DB="$2"
 			shift 2;;
+		-sdi_db|--sdi_db)
+			SDI_TENANT_DB="$2"
+			shift 2;;
 		-sid|--sid)
 			SID="$2"
 			if [[ ${SID} =~ ^[A-Z][A-Z,0-9][A-Z,0-9]$ ]]; then
@@ -1357,6 +1827,18 @@ if [ $# -gt 0 ]; then
 		-no_reg|--no_reg)
 			DO_NOT_REGISTER_RESOURCE=1
 			shift 1;;
+		-dpa_install_path|--dpa_install_path)
+			DPA_INSTALL_PATH="$2"
+			shift 2;;
+		-dpa_user|--dpa_user)
+			DPA_USER="$2"
+			shift 2;;
+		-dpa_listener_port|--dpa_listener_port)
+			DPA_LISTENER_PORT="$2"
+			shift 2;;
+		-dpa_admin_port|--dpa_admin_port)
+			DPA_ADMIN_PORT="$2"
+			shift 2;;
 		--)
 			shift
 			break;;
@@ -1385,6 +1867,7 @@ if [ $BATCH_MODE -eq 0 ]; then
 	searchSID
 	if [ ${HAS_SERVER} -eq 1 -a ${HAS_XSA} -eq 0 -a ${IMAGE_HAS_XSA} -eq 1 ];then
 		promptAddXSA
+		checkCompatibleXSAVersion
 	fi
 	if [ ${ADD_XSA} -eq 0 ]; then
 		if [ ${IMAGE_HAS_SERVER} -eq 0 ];then
@@ -1419,11 +1902,19 @@ if [ $BATCH_MODE -eq 0 ]; then
 		promptInstallSA
 	fi
 
+	if [ ${IMAGE_HAS_SDI} -eq 1 ];then
+		promptInstallSDI
+	fi
+
+	if [ ${IMAGE_HAS_DPA} -eq 1 ];then
+		promptInstallDPA
+	fi
+
 	if [ ${IMAGE_HAS_EML} -eq 1 ];then
 		promptInstallEML
 	fi
 else # batch mode
-	read -s MASTER_PWD
+	read -r -s MASTER_PWD
 	if ! isValidPassword $MASTER_PWD; then
 		exit 1
 	fi
@@ -1438,7 +1929,6 @@ else # batch mode
 	if [ -d "${IMAGE_DIR}/${DATA_UNITS_DIR}/${XSA_RT_COMP_DIR}" ]; then
 		IMAGE_HAS_XSA=1
 		COMPONENT="all"
-
 		if [ ! -f "${IMAGE_DIR}/${DATA_UNITS_DIR}/${WEB_IDE_COMP_DIR}/${WEB_IDE_ZIP_FILE}" ]; then
 			echo
 			echo "Invalid HANA, express edition installer directory."
@@ -1478,9 +1968,19 @@ else # batch mode
 		fi
 	fi
 
-	if [ -f "${IMAGE_DIR}/install_sa.sh" ]; then
+	if [ -f "${IMAGE_DIR}/install_hsa.sh" ]; then
 		IMAGE_HAS_SA=1
 		INSTALL_SA=1
+	fi
+
+	if [ -f "${IMAGE_DIR}/install_sdi.sh" ]; then
+		IMAGE_HAS_SDI=1
+		INSTALL_SDI=1
+	fi
+
+	if [ -d "${IMAGE_DIR}/${DATA_UNITS_DIR}/${DPA_DIR}" ]; then
+		IMAGE_HAS_DPA=1
+		INSTALL_DPA=1
 	fi
 
 	if [ -f "${IMAGE_DIR}/install_eml.sh" ]; then
@@ -1507,6 +2007,13 @@ installEADesigner
 
 installSA
 
+installSDI
+
+installDPA
+
 installEML
+
+echo
+echo
 
 appendRemainTasksStatusToPostSummary

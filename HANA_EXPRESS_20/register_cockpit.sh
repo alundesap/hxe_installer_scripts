@@ -1,6 +1,7 @@
 #!/bin/bash
 
 
+
 ############################################################################################
 # Print usage
 ############################################################################################
@@ -142,7 +143,8 @@ waitCockpitAppsStarted() {
 }
 
 isTenantDbStarted() {
-	HDB info | grep -v grep | grep hdbindexserver >& /dev/null
+	local hdbinfo_output=$(HDB info)
+	echo ${hdbinfo_output} | grep hdbindexserver >& /dev/null
 }
 
 ############################################################################################
@@ -249,19 +251,16 @@ getClientid_secret_url() {
 getAccessToken() {
 	echo "Get authentication token from UAA..."
 
-	create_tmp_file
-	echo "client_id=$clientid&client_secret=$clientsecret&grant_type=password&username=$xsa_admin&password=$xsa_admin_pwd&response_type=token" >> ${in_tmp_file} 2>&1
-	curl -s -u "$clientid:$clientsecret" --insecure -d @${in_tmp_file} -H "Content-Type:application/x-www-form-urlencoded" -X POST "$uaa_url/oauth/token" >> ${out_tmp_file} 2>&1
+	export LD_LIBRARY_PATH=
+	curl -s -u $clientid:$clientsecret --insecure -X POST --data-urlencode "client_id=$clientid" --data-urlencode "client_secret=$clientsecret" --data-urlencode "grant_type=password" --data-urlencode "username=$xsa_admin" --data-urlencode "password=$xsa_admin_pwd" --data-urlencode "response_type=token" "$uaa_url/oauth/token" >> ${out_tmp_file} 2>&1
 	access_token=`cat ${out_tmp_file} | grep access_token | sed 's/{"access_token":"\(.*\)/\1/' | sed 's/","token_type".*//'`
 	if [ -z "$access_token" ]; then
 		cat ${out_tmp_file}
 		echo
 		echo "ERROR: Failed get authentication token from UAA"
-		remove_tmp_file
 		exit 1
 	fi
-
-	remove_tmp_file
+	export LD_LIBRARY_PATH="$SAVE_LD_PATH"
 }
 
 # Create table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE
@@ -269,28 +268,62 @@ getAccessToken() {
 createTelemetryTable() {
         local installType=""
         if [ -f /usr/sap/${sid}/SYS/global/hdb/hxe_info.txt ]; then
-                installType=`grep '^INSTALL_DATE.*=' /usr/sap/${sid}/SYS/global/hdb/hxe_info.txt | cut -d'=' -f2`
+                installType=`grep '^INSTALL_TYPE.*=' /usr/sap/${sid}/SYS/global/hdb/hxe_info.txt | cut -d'=' -f2`
                 installType=`trim ${installType}`
         fi
 
-        execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM TABLES WHERE SCHEMA_NAME='_SYS_TELEMETRY' and TABLE_NAME='HXE_INSTALLATION_TYPE'"
+        execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM TABLES WHERE SCHEMA_NAME='_SYS_TELEMETRY' and TABLE_NAME='HXE_INSTALLATION_TYPE_BASE'"
         SQL_OUTPUT=`trim ${SQL_OUTPUT}`
         if [ "$SQL_OUTPUT" != "1" ]; then
-                echo "Create table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE..."
-                execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "CREATE TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE (TYPE VARCHAR(10))"
+                echo "Create table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE..."
+                execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "CREATE TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE (SNAPSHOT_ID TIMESTAMP, TYPE VARCHAR(10))"
         else
-                execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "TRUNCATE TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE"
+		echo "Truncate table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE..."
+                execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "TRUNCATE TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE"
         fi
-        execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "INSERT INTO _SYS_TELEMETRY.HXE_INSTALLATION_TYPE VALUES ('${installType}')"
+
+	# Drop table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE and recreate as a view
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM TABLES WHERE SCHEMA_NAME='_SYS_TELEMETRY' and TABLE_NAME='HXE_INSTALLATION_TYPE'"
+	SQL_OUTPUT=`trim ${SQL_OUTPUT}`
+	if [ "$SQL_OUTPUT" == "1" ]; then
+		echo "Drop table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE..."
+		execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "DROP TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE"
+	fi
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM VIEWS WHERE SCHEMA_NAME='_SYS_TELEMETRY' and VIEW_NAME='HXE_INSTALLATION_TYPE'"
+	SQL_OUTPUT=`trim ${SQL_OUTPUT}`
+	if [ "$SQL_OUTPUT" != "1" ]; then
+		echo "Create view _SYS_TELEMETRY.HXE_INSTALLATION_TYPE..."
+		execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "CREATE VIEW _SYS_TELEMETRY.HXE_INSTALLATION_TYPE (SNAPSHOT_ID, TYPE) AS SELECT SNAPSHOT_ID, TYPE FROM _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE WITH READ ONLY"
+	fi
+
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "INSERT INTO _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE (SNAPSHOT_ID, TYPE) VALUES (CURRENT_UTCTIMESTAMP, '${installType}')"
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "DELETE FROM _SYS_TELEMETRY.CONFIGURATION WHERE COLLECTOR_NAME = 'HXE_INSTALLATION_TYPE'"
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "INSERT INTO _SYS_TELEMETRY.CONFIGURATION (COLLECTOR_ID, COLLECTOR_NAME, COLLECTOR_STATUS, COLLECTOR_VERSION, BASE_COLLECTOR_ID, COLLECTION_INTERVAL, DEFAULT_COLLECTION_INTERVAL, MIN_COLLECTION_INTERVAL, MAX_COLLECTION_INTERVAL) VALUES (4012, 'HXE_INSTALLATION_TYPE', true, 1, 0, 1, 1, 1, 12)"
 }
 
 dropTelemetryTable() {
-        execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM TABLES WHERE SCHEMA_NAME='_SYS_TELEMETRY' and TABLE_NAME='HXE_INSTALLATION_TYPE'"
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM TABLES WHERE SCHEMA_NAME='_SYS_TELEMETRY' and TABLE_NAME='HXE_INSTALLATION_TYPE'"
+	SQL_OUTPUT=`trim ${SQL_OUTPUT}`
+	if [ "$SQL_OUTPUT" == "1" ]; then
+		echo "Drop table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE..."
+		execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "DROP TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE"
+	fi
+
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM VIEWS WHERE SCHEMA_NAME='_SYS_TELEMETRY' and VIEW_NAME='HXE_INSTALLATION_TYPE'"
+	SQL_OUTPUT=`trim ${SQL_OUTPUT}`
+	if [ "$SQL_OUTPUT" == "1" ]; then
+		echo "Drop view _SYS_TELEMETRY.HXE_INSTALLATION_TYPE..."
+		execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "DROP VIEW _SYS_TELEMETRY.HXE_INSTALLATION_TYPE"
+	fi
+
+        execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "SELECT COUNT(*) FROM TABLES WHERE SCHEMA_NAME='_SYS_TELEMETRY' and TABLE_NAME='HXE_INSTALLATION_TYPE_BASE'"
         SQL_OUTPUT=`trim ${SQL_OUTPUT}`
         if [ "$SQL_OUTPUT" == "1" ]; then
-                echo "Drop table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE"
-                execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "DROP TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE"
+                echo "Drop table _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE"
+                execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "DROP TABLE _SYS_TELEMETRY.HXE_INSTALLATION_TYPE_BASE"
         fi
+
+	execSQL ${instance_number} ${db_name} ${system_admin} ${system_admin_pwd} "DELETE FROM _SYS_TELEMETRY.CONFIGURATION WHERE COLLECTOR_NAME = 'HXE_INSTALLATION_TYPE'"
 }
 
 ############################################################################################
@@ -334,7 +367,6 @@ registerResource() {
 			certificateHost=`hostname -f`
 		fi
 
-		local save_ld_path="$LD_LIBRARY_PATH"
 		export LD_LIBRARY_PATH=
 		/usr/bin/openssl s_client -connect ${certificateHost}:3${instance_number}13 -showcerts -tls1 2>&1 | sed -n -e '/BEGIN\ CERTIFICATE/,/END\ CERTIFICATE/ p' >> /tmp/cert.$$ 2>&1
 		if ! grep -q "BEGIN CERTIFICATE" /tmp/cert.$$ >& /dev/null; then
@@ -343,7 +375,7 @@ registerResource() {
 			echo "Fail to retrieve certificate."
 			exit 1
 		fi
-		export LD_LIBRARY_PATH="$save_ld_path"
+		export LD_LIBRARY_PATH="$SAVE_LD_PATH"
 
 		create_tmp_file
 		echo "Add trusted certificate ${db_name}_CERT..."
@@ -386,57 +418,74 @@ registerResource() {
 	fi
 
 	waitCockpitAppsStarted
-	
+
+        create_tmp_file
+        echo "Create role collections..."
+        export LD_LIBRARY_PATH=
+        curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST "${adminui_url}/user/CreateRoleCollections" >> ${out_tmp_file} 2>&1
+        if grep "true" ${out_tmp_file} >& /dev/null
+        then
+                echo "Role collections created."
+        else
+                cat ${out_tmp_file}
+                echo
+                echo "ERROR: Failed to create role collections."
+                remove_tmp_file
+                exit 1
+        fi
+        remove_tmp_file
+        export LD_LIBRARY_PATH="$SAVE_LD_PATH"
+
+        getAccessToken
 	create_tmp_file
 	cat >> ${in_tmp_file} <<-EOF
 {"hostName":"$local_hostname","instanceNumber":"$instance_number","techUser":"$tech_user","techUserCredentials":"$tech_user_pwd","isMultiTenant":"true","databaseType":"$databaseType","databaseName":"$db_name","systemOwnerName":"$owner_name","systemOwnerEmail":"$owner_email","systemOwnerDetail":"$owner_details", "security": {"encryptJDBC":"$encryptJDBC", "encryptSAPControl":"$encryptSAPControl", "validateServerCertificate":"$validateCertificate", "certificateHostName":"$certificateHost"}}
 EOF
+	export LD_LIBRARY_PATH=
 	curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d @${in_tmp_file} "$adminui_url/registration/SystemRegister" >> ${out_tmp_file} 2>&1
-	if grep "resid\|PERSIST_REGISTRATION_RESOURCE_EXISTS" ${out_tmp_file} >& /dev/null
+	if grep "resid" ${out_tmp_file} >& /dev/null
 	then
 		echo "\"$db_name\" database is registered to Cockpit."
 	else
-		cat ${out_tmp_file}
-		echo
-		echo "ERROR: Failed to register \"$db_name\" database to Cockpit."
-		remove_tmp_file
-		exit 1
-	fi
-
-	echo "Create role collections..."
-	truncate --size=0 ${out_tmp_file} >& /dev/null
-	curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d @${in_tmp_file} "${adminui_url}/user/CreateRoleCollections" >> ${out_tmp_file} 2>&1
-	if grep "true" ${out_tmp_file} >& /dev/null
-	then
-		echo "Role collections created."
-	else
-		cat ${out_tmp_file}
-		echo
-		echo "ERROR: Failed to create role collections."
-		remove_tmp_file
-		exit 1
+		if grep "PERSIST_REGISTRATION_RESOURCE_EXISTS" ${out_tmp_file} >& /dev/null
+		then
+			echo "\"$db_name\" database is already registered to Cockpit."
+		else
+			cat ${out_tmp_file}
+			echo
+			echo "ERROR: Failed to register \"$db_name\" database to Cockpit."
+			remove_tmp_file
+			exit 1
+		fi
 	fi
 	remove_tmp_file
-        if [[ "${db_name}" =~ ^[S,s][Y,y][s,s][T,t][E,e][M,m][D,d][B,b]$ ]]; then
-                echo "Register XSA..."
-		getAccessToken
+	export LD_LIBRARY_PATH="$SAVE_LD_PATH"
 
-                create_tmp_file
+	create_tmp_file
+        if [[ "${db_name}" =~ ^[S,s][Y,y][S,s][T,t][E,e][M,m][D,d][B,b]$ ]]; then
+                echo "Register XSA..."
                 resource_id=$(getResourceIDFromDB)
                 cat >> ${in_tmp_file} <<-EOF
 {"resid":"${resource_id}","xsaUser":"${xsa_admin}","xsaPassword":"${xsa_admin_pwd}"}
 EOF
+		export LD_LIBRARY_PATH=
                 curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d @${in_tmp_file} "${persistence_url}/api/XSATelRegister" >> ${out_tmp_file} 2>&1
                 if grep "XSA is registered successfully" ${out_tmp_file} >& /dev/null
                 then
                         echo "XSA is registered."
                 else
-                        cat ${out_tmp_file}
-                        echo
-                        echo "ERROR: Failed to register XSA."
-                        remove_tmp_file
-                        exit 1
-                fi
+			if grep "XSA is already registered in cockpit" ${out_tmp_file} >& /dev/null
+                        then
+                                echo "XSA is already registered"
+                        else
+                                cat ${out_tmp_file}
+                                echo
+                                echo "ERROR: Failed to register XSA."
+                                remove_tmp_file
+                                exit 1
+                        fi
+		fi
+		export LD_LIBRARY_PATH="$SAVE_LD_PATH"
         fi
         remove_tmp_file
 }
@@ -472,25 +521,11 @@ unregisterResource() {
 		remove_tmp_file
 	fi
 
-        create_tmp_file
-	echo "Unregister \"${db_name}\" database from Cockpit..."
-	curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d '{"resid":"'"$resource_id"'"}' "$adminui_url/registration/ResourceUnregister" >> ${out_tmp_file} 2>&1
-        if grep "\"\"" ${out_tmp_file} >& /dev/null; then
-                echo "\"${db_name}\" database is unregistered in Cockpit."
-        else
-                cat ${out_tmp_file}
-                echo
-                echo "ERROR: Failed to unregister \"$db_name\" database in Cockpit."
-                remove_tmp_file
-                exit 1
-        fi
-        remove_tmp_file
-
-        if [[ "${db_name}" =~ ^[S,s][Y,y][s,s][T,t][E,e][M,m][D,d][B,b]$ ]]; then
-
-                create_tmp_file
-                echo "Unregister XSA..."
-                curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d '{"resid":"'"$resource_id"'"}' "${persistence_url}/api/XSATelUnRegister" >> ${out_tmp_file} 2>&1
+	export LD_LIBRARY_PATH=
+        if [[ "${db_name}" =~ ^[S,s][Y,y][S,s][T,t][E,e][M,m][D,d][B,b]$ ]]; then
+		create_tmp_file
+		echo "Unregister XSA..."
+		curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d '{"resid":"'"$resource_id"'"}' "${persistence_url}/api/XSATelUnRegister" >> ${out_tmp_file} 2>&1
                 if grep "XSA is unregistered successfully" ${out_tmp_file} >& /dev/null
                 then
                         echo "XSA is unregistered."
@@ -506,6 +541,21 @@ unregisterResource() {
                         	exit 1
                 	fi
 		fi
+		remove_tmp_file
+        fi
+	export LD_LIBRARY_PATH="$SAVE_LD_PATH"
+
+        create_tmp_file
+        echo "Unregister \"${db_name}\" database from Cockpit..."
+        curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d '{"resid":"'"$resource_id"'"}' "$adminui_url/registration/ResourceUnregister" >> ${out_tmp_file} 2>&1
+        if [ ! -s ${out_tmp_file} ]; then
+                echo "\"${db_name}\" database is unregistered in Cockpit."
+        else
+                cat ${out_tmp_file}
+                echo
+                echo "ERROR: Failed to unregister \"$db_name\" database in Cockpit."
+                remove_tmp_file
+                exit 1
         fi
         remove_tmp_file
 
@@ -638,7 +688,7 @@ changePwd() {
 ############################################################################################
 getResourceIDFromDB() {
 	create_tmp_file
-
+	export LD_LIBRARY_PATH=
 	curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X GET -d '{"hostName":"'"$local_hostname"'"}' $adminui_url/resource/RegisteredResourcesGet >> ${out_tmp_file} 2>&1
 	resources=$(grep "ResourceId" ${out_tmp_file})
 	if [ -n  "$resources" ]; then
@@ -653,6 +703,8 @@ getResourceIDFromDB() {
 		done
 	fi
 	echo
+
+	export LD_LIBRARY_PATH="$SAVE_LD_PATH"
 	remove_tmp_file
 }
 
@@ -678,7 +730,7 @@ promptUserPwd() {
 	fi
 
 	if [ -z "`echo ${!4}`" ]; then
-		read -s -p "Enter $default_user user password: " pwd
+		read -r -s -p "Enter $default_user user password: " pwd
 		eval $4=\$pwd
 	fi
 
@@ -698,10 +750,11 @@ promptNewPwd() {
 	echo
 	echo "Password must be at least 8 characters in length.  It must contain at least"
 	echo "1 uppercase letter, 1 lowercase letter, and 1 number.  Special characters"
-	echo "are allowed, except \\ (backslash), \" (double quotes), and \` (backtick)."
+	echo "are allowed, except \\ (backslash), ' (single quote), \" (double quotes),"
+	echo "\` (backtick), and \$ (dollar sign)."
 	echo
 	while [ 1 ] ; do
-		read -s -p "Enter new password for ${1}: " pwd
+		read -r -s -p "Enter new password for ${1}: " pwd
 		echo
 
 		if [ `echo "${pwd}" | wc -c` -le 8 ]; then
@@ -740,6 +793,14 @@ promptNewPwd() {
 			fi
 			showPolicy=1
 		fi
+		if echo "$pwd" | grep -F "'" >& /dev/null; then
+			if [ -z "$msg" ]; then
+				msg="' (single quote) not allowed"
+			else
+				msg="$msg, ' (single quote) not allowed"
+			fi
+			showPolicy=1
+		fi
 		if echo "$pwd" | grep -F '"' >& /dev/null; then
 			if [ -z "$msg" ]; then
 				msg="\" (double quotes) not allowed"
@@ -756,8 +817,17 @@ promptNewPwd() {
 			fi
 			showPolicy=1
 		fi
+		if echo "$pwd" | grep -F '$' >& /dev/null; then
+			if [ -z "$msg" ]; then
+				msg="\$ (dollar sign) not allowed"
+			else
+				msg="$msg, \$ (dollar sign) not allowed"
+			fi
+			showPolicy=1
+		fi
 		if [ $showPolicy -eq 1 ]; then
-			echo "Invalid password: ${msg}."
+			echo
+			echo "Invalid password: ${msg}." | fold -w 80 -s
 			echo
 			echo "Password must meet all of the following criteria:"
 			echo "- 8 or more letters"
@@ -765,7 +835,8 @@ promptNewPwd() {
 			echo "- At least 1 lowercase letter"
 			echo "- At least 1 number"
 			echo
-			echo "Special characters are optional; except \\ (backslash), \" (double quotes), and \` (backtick)."
+			echo "Special characters are optional; except \\ (backslash), ' (single quote),"
+			echo "\" (double quotes), \` (backtick), and \$ (dollar sign)."
 			echo
 			msg=""
 			showPolicy=0
@@ -784,7 +855,7 @@ EOF`
 			continue
 		fi
 
-		read -s -p "Enter new confirm password for ${1}: " confirm_pwd
+		read -r -s -p "Enter new confirm password for ${1}: " confirm_pwd
 		echo
 		if [ "${pwd}" != "${confirm_pwd}" ]; then
 			echo "Passwords do not match."
@@ -908,7 +979,6 @@ promptProxyInfo() {
 				fi
 			done
 		fi
-
 		# No proxy hosts
 		if [ -z "$no_proxy_host" ]; then
 			read -p "Enter comma separated domains that do not need proxy [$system_no_proxy_host]: " tmp
@@ -916,6 +986,7 @@ promptProxyInfo() {
 				no_proxy_host="$system_no_proxy_host"
 			else
 				no_proxy_host="$tmp"
+				no_proxy_host="$(addLocalHostToNoProxy "$no_proxy_host")"
 			fi
 		fi
 	elif [ "$proxy_action" == "enable_network" ]; then
@@ -1039,6 +1110,46 @@ getSystemHTTPProxy() {
 		system_no_proxy_host="${system_no_proxy_host%\'}"
 		system_no_proxy_host="${system_no_proxy_host#\'}"
 	fi
+	if [[ -n "$system_no_proxy_host" ]]; then
+		system_no_proxy_host="$(addLocalHostToNoProxy "$system_no_proxy_host")"
+	fi
+}
+
+addLocalHostToNoProxy() {
+	if [ -z "$1" ]; then
+		return
+	fi
+
+	local no_ph=$1
+	local has_localhost=0
+	local has_localhost_name=0
+	local has_localhost_ip=0
+
+	IFS=',' read -ra hlist <<< "$no_ph"
+	for i in "${hlist[@]}"; do
+		tmp=$(trim "$i")
+		if [ -n "${tmp}" ]; then
+			if [[ "${tmp}" =~ [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt] ]]; then
+				has_localhost=1
+			elif echo ${tmp} | grep -i "^${host_name}$" >& /dev/null; then
+				has_localhost_name=1
+			elif [[ "$tmp" == "127.0.0.1" ]]; then
+				has_localhost_ip=1
+			fi
+		fi
+	done
+
+	if [ $has_localhost_ip -eq 0 ]; then
+		no_ph="127.0.0.1, ${no_ph}"
+	fi
+	if [ $has_localhost_name -eq 0 ]; then
+		no_ph="${host_name}, ${no_ph}"
+	fi
+	if [ $has_localhost -eq 0 ]; then
+		no_ph="localhost, ${no_ph}"
+	fi
+
+	echo ${no_ph}
 }
 
 isValidHostName() {
@@ -1070,8 +1181,13 @@ isTrueFalse() {
 # $4 - password
 # $5 - SQL
 execSQL() {
+	local db="$2"
+	local db_lc=`echo "$2" | tr '[:upper:]' '[:lower:]'`
+	if [ "${db_lc}" == "systemdb" ]; then
+		db="SystemDB"
+	fi
 	local sql="$5"
-	SQL_OUTPUT=`hdbsql -a -x -i $1 -d $2 -u $3 -p "$4" "$sql"`
+	SQL_OUTPUT=`/usr/sap/${sid}/HDB${1}/exe/hdbsql -a -x -i ${1} -d ${db} -u ${3} -p ${4} ${sql} 2>&1`
 	if [ $? -ne 0 ]; then
 		# Strip out password string
 		if [ -n "$xsa_admin_pwd" ]; then
@@ -1083,7 +1199,7 @@ execSQL() {
 		if [ -n "$new_tech_user_pwd" ]; then
 			sql=`echo "${sql}" | sed "s/${new_tech_user_pwd}/********/g"`
 		fi
-		echo "hdbsql $2=> ${sql}"
+		echo "hdbsql $db => ${sql}"
 		echo "${SQL_OUTPUT}"
 		exit 1
 	fi
@@ -1099,8 +1215,7 @@ trim()
 }
 
 #
-formatNoProxyHost()
-{
+formatNoProxyHost() {
 	if [ -z "$1" ]; then
 		return
 	fi
@@ -1109,17 +1224,21 @@ formatNoProxyHost()
 	IFS=',' read -ra hlist <<< "$1"
 	for i in "${hlist[@]}"; do
 		tmp=$(trim "$i")
-		if [ -n "$tmp" ]; then
-			if [[ "$tmp" =~ ^[0-9]*\. ]] || [[ "$tmp" =~ [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt] ]]; then
-				no_ph="$no_ph|$tmp"
-			elif [[ "$tmp" =~ ^\. ]]; then
-				no_ph="$no_ph|*$tmp"
+		if [ -n "${tmp}" ]; then
+			if [[ "${tmp}" =~ ^[0-9]+\. ]] || [[ "${tmp}" =~ [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt] ]]; then
+				no_ph="${no_ph}|${tmp}"
+			elif echo ${tmp} | grep -i "^${host_name}$" >& /dev/null; then
+				no_ph="${no_ph}|${tmp}"
+			elif echo ${tmp} | grep -i "^${host_name}\.?*" >& /dev/null; then
+				no_ph="${no_ph}|${tmp}"
+			elif [[ "${tmp}" =~ ^\. ]]; then
+				no_ph="${no_ph}|*${tmp}"
 			else
-				no_ph="$no_ph|*.$tmp"
+				no_ph="${no_ph}|*.${tmp}"
 			fi
 		fi
 	done
-	echo $no_ph | sed 's/^|//'
+	echo ${no_ph} | sed 's/^|//'
 }
 
 ############################################################################################
@@ -1141,7 +1260,7 @@ configProxy() {
 		doProxySetting
 
 		proxyKey="http_non_proxy_hosts"
-		proxyValue=$(formatNoProxyHost "$no_proxy_host")
+		proxyValue="$(formatNoProxyHost "$no_proxy_host")"
 		doProxySetting
 	elif [ "$proxy_action" == "disable_http" ]; then
 		echo "Disable HTTP(S) proxy"
@@ -1194,6 +1313,7 @@ doProxySetting() {
 	echo "Set:"
 	echo "  proxyKey=$proxyKey"
 	echo "  proxyValue=$proxyValue"
+	export LD_LIBRARY_PATH=
 
 	create_tmp_file
 	curl -s --insecure -H "Content-Type:application/json" -H "Authorization:Bearer $access_token" -H "Accept:application/json" -X POST -d '{"key":"'"$proxyKey"'", "value":"'"$proxyValue"'"}' "$ls_url/settings/SettingsCreate" >> ${out_tmp_file} 2>&1
@@ -1255,6 +1375,8 @@ doProxySetting() {
                 fi
         fi
 
+	export LD_LIBRARY_PATH="$SAVE_LD_PATH"
+
 	echo "Succeed"
 	echo
 	remove_tmp_file
@@ -1299,6 +1421,7 @@ cleanup() {
 DEFAULT_SYSTEM_ADMIN="SYSTEM"
 DEFAULT_XSA_ADMIN="XSA_ADMIN"
 DEFAULT_TECH_USER="TEL_ADMIN"
+SAVE_LD_PATH="$LD_LIBRARY_PATH"
 
 base_name=`basename $0`
 in_tmp_file="/tmp/in.$$"
@@ -1325,6 +1448,7 @@ owner_email="${owner_name}@${local_hostname}"
 owner_details="Sample details"
 resource_id=""
 cfg_proxy_quiet=0
+host_name=`basename $SAP_RETRIEVAL_PATH`
 system_proxy_host=""
 system_proxy_port=""
 system_no_proxy_host=""

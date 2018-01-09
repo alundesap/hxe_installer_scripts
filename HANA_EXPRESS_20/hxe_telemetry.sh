@@ -369,7 +369,7 @@ validateNotBlank() {
 validatePassword() {
    #prompt the user to enter the password if it is blank.
    if [ -z "$db_password" ]; then
-     read -s -p "Enter the database user password: " db_password
+     read -r -s -p "Enter the database user password: " db_password
      printf "\n"
    fi
    #If the database password is still blank, fail the execution.
@@ -405,7 +405,8 @@ validateOptions() {
 # Check if tenant database started
 #########################################################################################
 isTenantDbStarted() {
-  HDB info | grep -v grep | grep hdbindexserver >& /dev/null
+  local hdbinfo_output=$(HDB info)
+  echo ${hdbinfo_output} | grep hdbindexserver >& /dev/null
 }
 
 ############################################################################################

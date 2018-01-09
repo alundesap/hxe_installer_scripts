@@ -25,11 +25,10 @@ getSID() {
 # Check what servers are installed and running
 #
 checkServer() {
-	count=`HDB info | grep hdbnameserver | wc -l`
-	if [ "$count" -gt "1" ]; then
+	local hdbinfo_output=$(HDB info)
+	if echo ${hdbinfo_output} | grep hdbnameserver >& /dev/null; then
 		HAS_SERVER=1
-		count=`HDB info | grep "/hana/shared/${SID}/xs/router" | wc -l`
-		if [ "$count" -gt "1" ]; then
+		if echo ${hdbinfo_output} | grep "/hana/shared/${SID}/xs/router" >& /dev/null; then
 			HAS_XSA=1
 		fi
 	else
@@ -47,7 +46,7 @@ checkServer() {
 promptPwd() {
 	local pwd=""
 	while [ 1 ]; do
-		read -s -p "Enter \"${1}\" password : " pwd
+		read -r -s -p "Enter \"${1}\" password : " pwd
 		if [ -z "$pwd" ]; then
 			echo
 			echo "Invalid empty password. Please re-enter."
@@ -71,13 +70,11 @@ promptPwd() {
 execSQL() {
 	local db="$2"
 	local db_lc=`echo "$2" | tr '[:upper:]' '[:lower:]'`
-	local sql="$5"
-
 	if [ "${db_lc}" == "systemdb" ]; then
 		db="SystemDB"
 	fi
-
-	SQL_OUTPUT=`/usr/sap/${SID}/HDB${1}/exe/hdbsql -a -x -i ${1} -d ${db} -u ${3} -p "${4}" "${sql}" 2>&1`
+	local sql="$5"
+	SQL_OUTPUT=`/usr/sap/${SID}/HDB${1}/exe/hdbsql -a -x -i ${1} -d ${db} -u ${3} -p ${4} ${sql} 2>&1`
 	if [ $? -ne 0 ]; then
 		# Strip out password string
 		if [ -n "${4}" ]; then

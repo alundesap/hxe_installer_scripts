@@ -42,18 +42,17 @@ checkEnv() {
 # Check what servers are installed and running
 #
 checkServer() {
-	count=`HDB info | grep hdbnameserver | wc -l`
-	if [ "$count" -gt "1" ]; then
+	local hdbinfo_output=$(HDB info)
+	if echo ${hdbinfo_output} | grep hdbnameserver >& /dev/null; then
 		HAS_SERVER=1
-		count=`HDB info | grep "/hana/shared/${HXE_SID}/xs/router" | wc -l`
-		if [ "$count" -gt "1" ]; then
+		if echo ${hdbinfo_output} | grep "/hana/shared/${HXE_SID}/xs/router" >& /dev/null; then
 			HAS_XSA=1
 		fi
 	else
+		echo
 		echo "Cannot find running HANA server.  Please start HANA with \"HDB start\" command."
 		exit 1
 	fi
-
 }
 
 #
@@ -146,7 +145,7 @@ promptInstanceNumber() {
 promptPwd() {
 	local pwd=""
 	while [ 1 ]; do
-		read -s -p "Enter ${1} password : " pwd
+		read -r -s -p "Enter ${1} password : " pwd
 		if [ -z "$pwd" ]; then
 			echo
 			echo "Invalid empty password. Please re-enter."
@@ -176,10 +175,11 @@ promptNewPwd() {
 	echo
 	echo "Password must be at least 8 characters in length.  It must contain at least"
 	echo "1 uppercase letter, 1 lowercase letter, and 1 number.  Special characters"
-	echo "are allowed, except \\ (backslash), \" (double quotes), and \` (backtick)."
+	echo "are allowed, except \\ (backslash), ' (single quote), \" (double quotes),"
+	echo "\` (backtick), and \$ (dollar sign)."
 	echo
 	while [ 1 ] ; do
-		read -s -p "Enter new password for \"${1}\": " pwd
+		read -r -s -p "Enter new password for \"${1}\": " pwd
 		echo
 
 		if [ `echo "${pwd}" | wc -c` -le 8 ]; then
@@ -218,6 +218,14 @@ promptNewPwd() {
 			fi
 			showPolicy=1
 		fi
+		if echo "$pwd" | grep -F "'" >& /dev/null; then
+			if [ -z "$msg" ]; then
+				msg="' (single quote) not allowed"
+			else
+				msg="$msg, ' (single quote) not allowed"
+			fi
+			showPolicy=1
+		fi
 		if echo "$pwd" | grep -F '"' >& /dev/null; then
 			if [ -z "$msg" ]; then
 				msg="\" (double quotes) not allowed"
@@ -234,8 +242,17 @@ promptNewPwd() {
 			fi
 			showPolicy=1
 		fi
+		if echo "$pwd" | grep -F '$' >& /dev/null; then
+			if [ -z "$msg" ]; then
+				msg="\$ (dollar sign) not allowed"
+			else
+				msg="$msg, \$ (dollar sign) not allowed"
+			fi
+			showPolicy=1
+		fi
 		if [ $showPolicy -eq 1 ]; then
-			echo "Invalid password: ${msg}."
+			echo
+			echo "Invalid password: ${msg}." | fold -w 80 -s
 			echo
 			echo "Password must meet all of the following criteria:"
 			echo "- 8 or more letters"
@@ -243,7 +260,8 @@ promptNewPwd() {
 			echo "- At least 1 lowercase letter"
 			echo "- At least 1 number"
 			echo
-			echo "Special characters are optional; except \\ (backslash), \" (double quotes), and \` (backtick)."
+			echo "Special characters are optional; except \\ (backslash), ' (single quote),"
+			echo "\" (double quotes), \` (backtick), and \$ (dollar sign)."
 			echo
 			msg=""
 			showPolicy=0
@@ -264,7 +282,7 @@ EOF`
 			continue
 		fi
 
-		read -s -p "Enter new confirm password for \"${1}\": " confirm_pwd
+		read -r -s -p "Enter new confirm password for \"${1}\": " confirm_pwd
 		echo
 		if [ "${pwd}" != "${confirm_pwd}" ]; then
 			echo
@@ -289,12 +307,16 @@ promptProxyInfo() {
 
 	getSystemHTTPProxy
 
+	local prompt_msg="Do you need to use proxy server to access the internet? [N] : "
+	if [ -n "$SYSTEM_PROXY_HOST" ]; then
+		prompt_msg="Do you need to use proxy server to access the internet? [Y] : "
+	fi
 	while [ 1 ] ; do
-		read -p "Do you need to use proxy server to access the internet? (Y/N): " tmp
-		if [ "$tmp" == "Y" -o "$tmp" == "y" ]; then
+		read -p "$prompt_msg" tmp
+		if [ "$tmp" == "Y" -o "$tmp" == "y" ] || [ -z "$tmp" -a -n "$SYSTEM_PROXY_HOST" ]; then
 			SETUP_PROXY=1
 			break
-		elif [ "$tmp" == "N" -o "$tmp" == "n" ]; then
+		elif [ "$tmp" == "N" -o "$tmp" == "n" ] || [ -z "$tmp" -a -z "$SYSTEM_PROXY_HOST" ]; then
 			SETUP_PROXY=0
 			return
 		else
@@ -349,7 +371,35 @@ promptProxyInfo() {
 		NO_PROXY_HOST="$SYSTEM_NO_PROXY_HOST"
 	else
 		NO_PROXY_HOST="$tmp"
+		NO_PROXY_HOST="$(addLocalHostToNoProxy "$NO_PROXY_HOST")"
 	fi
+}
+
+#
+formatNoProxyHost() {
+	if [ -z "$1" ]; then
+		return
+	fi
+
+	local no_ph=""
+	IFS=',' read -ra hlist <<< "$1"
+	for i in "${hlist[@]}"; do
+		tmp=$(trim "$i")
+		if [ -n "${tmp}" ]; then
+			if [[ "${tmp}" =~ ^[0-9]+\. ]] || [[ "${tmp}" =~ [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt] ]]; then
+				no_ph="${no_ph}|${tmp}"
+			elif echo ${tmp} | grep -i "^${HOST_NAME}$" >& /dev/null; then
+				no_ph="${no_ph}|${tmp}"
+			elif echo ${tmp} | grep -i "^${HOST_NAME}\.?*" >& /dev/null; then
+				no_ph="${no_ph}|${tmp}"
+			elif [[ "${tmp}" =~ ^\. ]]; then
+				no_ph="${no_ph}|*${tmp}"
+			else
+				no_ph="${no_ph}|*.${tmp}"
+			fi
+		fi
+	done
+	echo ${no_ph} | sed 's/^|//'
 }
 
 #
@@ -429,8 +479,47 @@ getSystemHTTPProxy() {
 		SYSTEM_NO_PROXY_HOST="${SYSTEM_NO_PROXY_HOST%\'}"
 		SYSTEM_NO_PROXY_HOST="${SYSTEM_NO_PROXY_HOST#\'}"
 	fi
+	if [[ -n "$SYSTEM_NO_PROXY_HOST" ]]; then
+		SYSTEM_NO_PROXY_HOST="$(addLocalHostToNoProxy "$SYSTEM_NO_PROXY_HOST")"
+	fi
 }
 
+addLocalHostToNoProxy() {
+	if [ -z "$1" ]; then
+		return
+	fi
+
+	local no_ph=$1
+	local has_localhost=0
+	local has_localhost_name=0
+	local has_localhost_ip=0
+
+	IFS=',' read -ra hlist <<< "$no_ph"
+	for i in "${hlist[@]}"; do
+		tmp=$(trim "$i")
+		if [ -n "${tmp}" ]; then
+			if [[ "${tmp}" =~ [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt] ]]; then
+				has_localhost=1
+			elif echo ${tmp} | grep -i "^${HOST_NAME}$" >& /dev/null; then
+				has_localhost_name=1
+			elif [[ "$tmp" == "127.0.0.1" ]]; then
+				has_localhost_ip=1
+			fi
+		fi
+	done
+
+	if [ $has_localhost_ip -eq 0 ]; then
+		no_ph="127.0.0.1, ${no_ph}"
+	fi
+	if [ $has_localhost_name -eq 0 ]; then
+		no_ph="${HOST_NAME}, ${no_ph}"
+	fi
+	if [ $has_localhost -eq 0 ]; then
+		no_ph="localhost, ${no_ph}"
+	fi
+
+	echo ${no_ph}
+}
 
 isValidHostName() {
 	local hostname_regex='^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$'
@@ -459,40 +548,90 @@ isValidPort() {
 # $4 - password
 # $5 - SQL
 execSQL() {
-	sql="$5"
-	SQL_OUTPUT=`hdbsql -a -x -i $1 -d $2 -u $3 -p "$4" "$sql"`
+	local db="$2"
+	local db_lc=`echo "$2" | tr '[:upper:]' '[:lower:]'`
+	if [ "${db_lc}" == "systemdb" ]; then
+		db="SystemDB"
+	fi
+	local sql="$5"
+	if [ $RUN_IN_DOCKER -ne 1 ]; then
+		SQL_OUTPUT=`/usr/sap/${HXE_SID}/HDB${1}/exe/hdbsql -a -x -i ${1} -d ${db} -u ${3} -p ${4} ${sql} 2>&1`
+	else
+		SQL_OUTPUT=`/usr/sap/${HXE_SID}/HDB${1}/exe/hdbsql -a -x -i ${1} -d ${db} -U ${system_store_key} -B UTF8 ${sql} 2>&1`
+	fi
 	if [ $? -ne 0 ]; then
 		# Strip out password string
-		sql=`echo "${sql}" | sed "s/${SYSTEM_PWD}/********/g"`
-		sql=`echo "${sql}" | sed "s/${TEL_ADMIN_PWD}/********/g"`
-		sql=`echo "${sql}" | sed "s/${XSA_ADMIN_PWD}/********/g"`
-		sql=`echo "${sql}" | sed "s/${XSA_DEV_PWD}/********/g"`
-		echo "hdbsql $2=> ${sql}"
+		if [ -n "${4}" ]; then
+			sql=`echo "${sql}" | sed "s/${4}/********/g"`
+		fi
+		if [ -n "${SYSTEM_PWD}" ]; then
+			sql=`echo "${sql}" | sed "s/${SYSTEM_PWD}/********/g"`
+		fi
+		if [ -n "${TEL_ADMIN_PWD}" ]; then
+			sql=`echo "${sql}" | sed "s/${TEL_ADMIN_PWD}/********/g"`
+		fi
+		if [ -n "${XSA_ADMIN_PWD}" ]; then
+			sql=`echo "${sql}" | sed "s/${XSA_ADMIN_PWD}/********/g"`
+		fi
+		if [ -n "${XSA_DEV_PWD}" ]; then
+			sql=`echo "${sql}" | sed "s/${XSA_DEV_PWD}/********/g"`
+		fi
+		echo "hdbsql $db => ${sql}"
 		echo "${SQL_OUTPUT}"
 		exit 1
 	fi
 }
 
-#
-# Reduce resource usage in HANA by doing the following:
-# - turn off statistics server for server only install
-# - turn on statistics server for XSA installs
-# - reclaim the log and datavolume
-setStatisticsServer() {
-	# Turn off the statistics server for server only install
-	if [ $HAS_XSA -eq 0 ]; then
-		echo "Turning off statistics server..."
-		execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "alter system alter configuration('nameserver.ini','SYSTEM') SET ('statisticsserver','active') = 'false' with reconfigure"
-	else
-		echo "Turning on statistics server..."
-		execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "alter system alter configuration('nameserver.ini','SYSTEM') SET ('statisticsserver','active') = 'true' with reconfigure"
+setWebIDEProxy() {
+	#xs set-env di-local-npm-registry UPSTREAM_LINK http://registry.npmjs.org/
+	#xs set-env di-local-npm-registry SAPUPSTREAM_LINK https://npm.sap.com/
+
+	if [ $SETUP_PROXY -eq 1 ] && [ $HAS_XSA -eq 1 ]; then
+		echo "Set proxy for WEB_IDE..."
+		echo "Check/Wait for di-local-npm-registry and di-core apps to start.  This may take a while..."
+		xs wait-for-apps --timeout 3600 --apps "di-local-npm-registry,di-core"
+		if [ $? -ne 0 ]; then
+			echo
+			echo "Waiting for apps to start has timeout."
+			exit 1
+		fi
+
+		if [ -n "${PROXY_PORT}" ]; then
+			xs set-env di-local-npm-registry HTTP_PROXY http://${PROXY_HOST}:${PROXY_PORT}
+		else
+			xs set-env di-local-npm-registry HTTP_PROXY http://${PROXY_HOST}
+		fi
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+		xs set-env di-local-npm-registry NO_PROXY "${NO_PROXY_HOST}"
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+
+		xs restage di-local-npm-registry
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+		xs restart di-local-npm-registry
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+
+		xs set-env di-core JBP_CONFIG_JAVA_OPTS "[java_opts: \"-Dhttp.proxyHost=${PROXY_HOST} -Dhttp.proxyPort=${PROXY_PORT} -Dhttp.nonProxyHosts='$(formatNoProxyHost "$NO_PROXY_HOST")'\"]"
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+
+		xs restage di-core
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+		xs restart di-core
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
 	fi
-
-	echo "Reclaiming log space..."
-	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "alter system reclaim log"
-
-	echo "Reclaiming disk space..."
-	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "alter system reclaim datavolume 105 defragment"
 }
 
 #Create role collections for webide
@@ -514,7 +653,7 @@ createRoleCollections() {
 		exit 1
 	fi
 
-	TOKEN=`curl -s -S --max-time 300 --insecure -u ${CLIENT_ID}:${CLIENT_SECRET} "${UAA_URL}/oauth/token?grant_type=password&username=XSA_ADMIN&password=${XSA_ADMIN_PWD}" | cut -d'"' -f4`
+	TOKEN=`curl -s -S --max-time 300 --insecure -u ${CLIENT_ID}:${CLIENT_SECRET} --data-urlencode "password=${XSA_ADMIN_PWD}" "${UAA_URL}/oauth/token?grant_type=password&username=XSA_ADMIN" | cut -d'"' -f4`
 	if [ -z "$TOKEN" ]; then
 		echo "Failed to get token."
 		exit 1
@@ -560,7 +699,6 @@ createRoleCollections() {
 	fi
 }
 
-
 #
 # Deploys the di-builder for webide
 #
@@ -573,7 +711,6 @@ builderDeployment() {
 
 	DI_CORE_URL=$(xs app --urls di-core)
 	ENV_PARAMS=`xs env di-core`
-	HOST_NAME=`hostname -f`
 
 	#authentication (get token)
 	CLIENT_ID=`echo "$ENV_PARAMS" | grep "clientid" | cut -d'"' -f4`
@@ -587,7 +724,7 @@ builderDeployment() {
 		exit 1
 	fi
 
-	TOKEN=`curl -s -S --max-time 300 --insecure --noproxy ${HOST_NAME} -u ${CLIENT_ID}:${CLIENT_SECRET} "${UAA_URL}/oauth/token?grant_type=password&username=XSA_ADMIN&password=${XSA_ADMIN_PWD}" | cut -d'"' -f4`
+	TOKEN=`curl -s -S --max-time 300 --insecure --noproxy ${HOST_NAME} -u ${CLIENT_ID}:${CLIENT_SECRET} --data-urlencode "password=${XSA_ADMIN_PWD}" "${UAA_URL}/oauth/token?grant_type=password&username=XSA_ADMIN" | cut -d'"' -f4`
 	if [ -z "$TOKEN" ]; then
 		echo "$TOKEN"
 		echo
@@ -595,17 +732,17 @@ builderDeployment() {
 		exit 1
 	fi
 
-	#Get space id for $DEV_SPACE_NAME (And retry for 10 minutes in case di-core isn't running yet)
+	#Get space id for $DEV_SPACE_NAME (And retry for 20 minutes in case di-core isn't running yet)
 	TICKER=0
 	RESPONSE_SPACE_ID_LEN=0
 	echo -n "Waiting for di-core to start..."
-	while [ $RESPONSE_SPACE_ID_LEN -ne 36 ] && [ $TICKER -lt 15 ] ; do
+	while [ $RESPONSE_SPACE_ID_LEN -ne 36 ] && [ $TICKER -lt 80 ] ; do
 		RESPONSE=$(curl -s -S --max-time 180 --insecure --noproxy $HOST_NAME -H "Accept: application/json" -H "Authorization: Bearer ${TOKEN}" $DI_CORE_URL/admin/builder/installed_builders)
 		SPACE_ID=`echo "$RESPONSE" | tr "}" "\n" | grep "spaceName\":\"$DEV_SPACE_NAME" | cut -d'"' -f12`
 		RESPONSE_SPACE_ID_LEN=${#SPACE_ID}
 		if [ $RESPONSE_SPACE_ID_LEN -ne 36 ] ; then
 			echo -n "."
-			sleep 60s
+			sleep 15s
 		else
 			echo
 			echo "di-core has started"
@@ -635,12 +772,12 @@ builderDeployment() {
 		exit 1
 	fi
 
-	#wait for status successful (or for 5 minutes to go by)
+	#wait for status successful (or for 20 minutes to go by)
 	echo -n "Wait for builder to deploy..."
 	TICKER=0
 	STATUS=""
-	while [ "$WORKING" == "true" ] && [ $TICKER -lt 10 ] ; do
-		sleep 60s
+	while [ "$WORKING" == "true" ] && [ $TICKER -lt 80 ] ; do
+		sleep 15s
 		TICKER=$(($TICKER + 1))
 		S_RESPONSE=$(curl -s -S --max-time 180 --insecure --noproxy $HOST_NAME -H "Accept: application/json" -H "Authorization: Bearer ${TOKEN}" $DI_CORE_URL/admin/builder/status/$SPACE_ID)
 		STATUS=`echo "$S_RESPONSE" | cut -d'"' -f14`
@@ -670,8 +807,6 @@ builderDeployment() {
 	fi
 }
 
-
-
 #Execute scripts to add and configure required xsa users and stop services
 #that do not need to be running
 postProcessXSA() {
@@ -696,7 +831,7 @@ postProcessXSA() {
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini', 'SYSTEM') SET ('session', 'idle_connection_timeout') = '60' WITH RECONFIGURE;"
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('indexserver.ini', 'SYSTEM') SET ('session', 'idle_connection_timeout') = '60' WITH RECONFIGURE;"
 
-	output=`xs login -u xsa_admin -p "${XSA_ADMIN_PWD}" -s ${SPACE_NAME}`
+	output=`xs login -u xsa_admin -p ${XSA_ADMIN_PWD} -s ${SPACE_NAME}`
 	if [ $? -ne 0 ]; then
 		echo "${output}"
 		echo
@@ -704,8 +839,11 @@ postProcessXSA() {
 		exit 1
 	fi
 
+	setWebIDEProxy
+
 	#Create role collections for webide
 	createRoleCollections
+	echo
 
 	#Change password policy
 	echo "Change password policy..."
@@ -723,47 +861,45 @@ postProcessXSA() {
 	#altering the xsa_admin user to assign the role collection
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER USER XSA_ADMIN SET PARAMETER XS_RC_XS_CONTROLLER_USER = 'XS_CONTROLLER_USER', XS_RC_DEVX_ADMIN = 'DEVX_ADMINISTRATOR', XS_RC_XS_AUTHORIZATION_ADMIN = 'XS_AUTHORIZATION_ADMIN'"
 
-	echo "Updating space \"$SPACE_NAME\" and \"$DEV_SPACE_NAME\" in org \"HANAExpress\"..."
-	output=`xs update-space SAP -u $HXE_ADM`
-	if [ $? -ne 0 ]; then
-		echo "${output}"
-		exit 1
-	fi
-
-	space_users=`xs space-users HANAExpress SAP`
+	echo "Set space roles in \"$SPACE_NAME\" space in \"HANAExpress\" org..."
+	space_users=`xs space-users HANAExpress ${SPACE_NAME}`
 	if [ $? -ne 0 ]; then
 		echo "$space_users"
 		echo "Cannot get space users."
 		exit 1
 	fi
-
 	if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_ADMIN >& /dev/null; then
 		xs set-space-role XSA_ADMIN HANAExpress $SPACE_NAME SpaceDeveloper
 		if [ $? -ne 0 ]; then
 			exit 1
 		fi
 	fi
+	if ! echo "$space_users" | grep ^SpaceAuditor | grep XSA_DEV >& /dev/null; then
+		xs set-space-role XSA_DEV HANAExpress $SPACE_NAME SpaceAuditor
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+	fi
 
-        if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_ADMIN >& /dev/null; then
-                xs set-space-role XSA_ADMIN HANAExpress $DEV_SPACE_NAME SpaceDeveloper
-                if [ $? -ne 0 ]; then
-                        exit 1
-                fi
-        fi
-
-        if ! echo "$space_users" | grep ^SpaceAuditor | grep XSA_DEV >& /dev/null; then
-                xs set-space-role XSA_DEV HANAExpress $SPACE_NAME SpaceAuditor
-                if [ $? -ne 0 ]; then
-                        exit 1
-                fi
-        fi
-
-        if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_DEV >& /dev/null; then
-                xs set-space-role XSA_DEV HANAExpress $DEV_SPACE_NAME SpaceDeveloper
-                if [ $? -ne 0 ]; then
-                        exit 1
-                fi
-        fi
+	echo "Set space roles in \"$DEV_SPACE_NAME\" space in \"HANAExpress\" org..."
+	space_users=`xs space-users HANAExpress ${DEV_SPACE_NAME}`
+	if [ $? -ne 0 ]; then
+		echo "$space_users"
+		echo "Cannot get space users."
+		exit 1
+	fi
+	if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_ADMIN >& /dev/null; then
+		xs set-space-role XSA_ADMIN HANAExpress $DEV_SPACE_NAME SpaceDeveloper
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+	fi
+	if ! echo "$space_users" | grep ^SpaceDeveloper | grep XSA_DEV >& /dev/null; then
+		xs set-space-role XSA_DEV HANAExpress $DEV_SPACE_NAME SpaceDeveloper
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
+	fi
 
 	#Cockpit
 	org_users=`xs org-users HANAExpress`
@@ -857,7 +993,7 @@ cleanupEachApp     () {
 cleanupApps() {
 
 	echo "Cleanup stopped applications..."
-	output=`xs login -u xsa_admin -p "${XSA_ADMIN_PWD}" -s SAP`
+	output=`xs login -u xsa_admin -p ${XSA_ADMIN_PWD} -s SAP`
 	if [ $? -ne 0 ]; then
 		echo "${output}"
 		echo
@@ -882,7 +1018,7 @@ stopApps() {
 	action=stop
 
 	echo "Stop applications..."
-	output=`xs login -u xsa_admin -p "${XSA_ADMIN_PWD}" -s SAP`
+	output=`xs login -u xsa_admin -p ${XSA_ADMIN_PWD} -s SAP`
 	if [ $? -ne 0 ]; then
 		echo "${output}"
 		echo
@@ -892,10 +1028,6 @@ stopApps() {
 
 	#stop all the apps for jobscheduler
 	xs mta com.sap.xs.jobscheduler | processMTA
-
-	#stop all the apps for devx
-#	xs mta com.sap.devx.webide | processMTA
-#	xs mta com.sap.devx.di.builder | processMTA
 
 	echo "Stopping di-cert-admin-ui..."
 	output=`xs stop di-cert-admin-ui`
@@ -910,6 +1042,10 @@ stopApps() {
 		echo "${output}"
 		exit 1
 	fi
+
+	#stop all the apps for devx
+#	xs mta com.sap.devx.webide | processMTA
+#	xs mta com.sap.devx.di.builder | processMTA
 
 #	echo "Stopping sap-portal-services..."
 #	output=`xs stop sap-portal-services`
@@ -928,7 +1064,7 @@ waitAppsStarted() {
 	fi
 
 	echo "Login to XSA services..."
-	output=`xs login -u xsa_admin -p "${XSA_ADMIN_PWD}" -s ${SPACE_NAME}`
+	output=`xs login -u xsa_admin -p ${XSA_ADMIN_PWD} -s ${SPACE_NAME}`
 	if [ $? -ne 0 ]; then
 		echo "${output}"
 		echo
@@ -937,7 +1073,7 @@ waitAppsStarted() {
 	fi
 
 	echo "Check/Wait for all apps to start.  This may take a while..."
-	output=`xs wait-for-apps --timeout 3600 --all-instances --space $SPACE_NAME`
+	output=`xs wait-for-apps --timeout 3600 --all-instances --space ${SPACE_NAME}`
 	if [ $? -ne 0 ]; then
 		echo "${output}"
 		echo
@@ -955,13 +1091,13 @@ grantActivatedRole() {
 	local retry=300
 	local granted=0
 	local role_list=(
-		sap.hana.ide.roles::EditorDeveloper
-		sap.hana.ide.roles::CatalogDeveloper
-		sap.hana.ide.roles::SecurityAdmin
-		sap.hana.ide.roles::TraceViewer
 		sap.hana.xs.admin.roles::HTTPDestViewer
 		sap.hana.xs.admin.roles::SQLCCAdministrator
 		sap.hana.xs.debugger::Debugger
+		sap.hana.ide.roles::EditorDeveloper
+                sap.hana.ide.roles::CatalogDeveloper
+                sap.hana.ide.roles::SecurityAdmin
+                sap.hana.ide.roles::TraceViewer
 	)
 
 	if [ $HAS_XSA -eq 1 -o $HAS_XSC -eq 1 ]; then
@@ -1185,14 +1321,19 @@ EOF
 
 postProcessServer() {
 
-	# Enable debugger in the workbench
+	# Enable debugger in workbench
+	echo "Enable debugger in workbench..."
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') set ('debugger','enabled') = 'true' WITH RECONFIGURE;"
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') set ('httpserver','developer_mode') = 'true' WITH RECONFIGURE;"
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM ALTER CONFIGURATION ('nameserver.ini','SYSTEM') set ('debugger','listenport') = '3${HANA_INSTANCE}08' WITH RECONFIGURE;"
 
+	echo "Enable statistics server..."
+	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "alter system alter configuration('nameserver.ini','SYSTEM') SET ('statisticsserver','active') = 'true' with reconfigure"
+
 	# Include diserver in startup for server-only
 	if [ $HAS_XSA -eq 0 ]; then
 		# SAP_RETRIEVAL_PATH=/hana/shared/${HXE_SID}/HDB${HANA_INSTANCE}/hxehost
+		echo "Enable diserver server..."
 		if ! grep '^\[diserver\]' $SAP_RETRIEVAL_PATH/daemon.ini >& /dev/null; then
 			cat >> ${SAP_RETRIEVAL_PATH}/daemon.ini <<-EOF
 
@@ -1206,6 +1347,8 @@ EOF
 collectGarbage() {
 	echo "Do garbage collection..."
 
+	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM RECLAIM LOG"
+	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM RECLAIM DATAVOLUME 105 DEFRAGMENT"
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM RECLAIM VERSION SPACE"
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM SAVEPOINT"
 	execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "ALTER SYSTEM CLEAR SQL PLAN CACHE"
@@ -1229,20 +1372,6 @@ collectGarbage() {
 			fi
 		fi
 	done
-
-#	local tables="LM_SL_PERSISTENCE_FILE ALM_CONTAINER_FILE"
-#	local schema=""
-#	local table=""
-#	for table in ${tables}; do
-#		execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "SELECT SCHEMA_NAME FROM M_TABLE_PERSISTENCE_STATISTICS WHERE TABLE_NAME='${table}'"
-#		for schema in $SQL_OUTPUT; do
-#			schema=`trim ${schema}`
-#			if [ -n "${schema}" ]; then
-#				echo "Truncate table ${schema}.\"${table}\"..."
-#				execSQL ${HANA_INSTANCE} SystemDB SYSTEM ${SYSTEM_PWD} "TRUNCATE TABLE ${schema}.\"${table}\""
-#			fi
-#		done
-#	done
 
 	echo "Reclaim data volume..."
 	output=`hdbcons -e hdbnameserver "dvol reclaim -o 105"`
@@ -1321,6 +1450,7 @@ else
         PLATFORM="linuxx86_64"
 fi
 
+HOST_NAME=`basename $SAP_RETRIEVAL_PATH`
 HAS_SERVER=0
 HAS_XSC=0
 HAS_XSA=0
@@ -1349,6 +1479,8 @@ SPACE_NAME="SAP"
 DEV_SPACE_NAME="development"
 
 DO_NOT_REGISTER_RESOURCE=0
+RUN_IN_DOCKER=0
+declare -r system_store_key=runtmpsys
 
 getSID
 
@@ -1360,7 +1492,7 @@ checkServer
 # Parse argument
 #
 if [ $# -gt 0 ]; then
-	PARSED_OPTIONS=`getopt -n "$PROG_NAME" -a -o i:p: --long tp:,xsap:,xsadevp:,ph:,pp:,nph:,no_reg -- "$@"`
+	PARSED_OPTIONS=`getopt -n "$PROG_NAME" -a -o di:p: --long tp:,xsap:,xsadevp:,ph:,pp:,nph:,no_reg -- "$@"`
 	if [ $? -ne 0 -o "$#" -eq 0 ]; then
 		exit 1
 	fi
@@ -1370,6 +1502,8 @@ if [ $# -gt 0 ]; then
 	while true
 	do
 		case "$1" in
+		-d)	RUN_IN_DOCKER=1
+			shift;;
 		-i)
 			HANA_INSTANCE="$2"
 			shift 2;;
@@ -1420,6 +1554,15 @@ if [ $# -gt 0 ]; then
 	done
 fi
 
+if [ $RUN_IN_DOCKER -eq 1 ]; then
+	HXE_SID="${SAPSYSTEMNAME}"
+	HANA_INSTANCE="${TINSTANCE}"
+	SYSTEM_PWD="manager"
+	TEL_ADMIN_PWD="manager"
+	XSA_ADMIN_PWD="manager"
+	XSA_DEV_PWD="manager"
+fi
+
 promptInstanceNumber
 
 if [ -z "$SYSTEM_PWD" ]; then
@@ -1442,12 +1585,11 @@ if [ $HAS_XSA -eq 1 ]; then
 			promptPwd "XSA administrative user (XSA_ADMIN)" "XSA_ADMIN_PWD"
 		done
 	fi
-
 	if [ -z "$XSA_DEV_PWD" ]; then
 		promptNewPwd "XSA development user (XSA_DEV)" "XSA_DEV_PWD"
 	fi
 
-	if [ -z "$PROXY_HOST" -o -z "$PROXY_PORT" ]; then
+	if [ -z "$PROXY_HOST" -o -z "$PROXY_PORT" ] && [ $RUN_IN_DOCKER -ne 1 ]; then
 		promptProxyInfo
 	fi
 fi
@@ -1470,23 +1612,7 @@ postProcessXSA
 
 grantActivatedRole
 
-setStatisticsServer
-
 removePostInstallFiles
-
-echo "Restarting HDB..."
-output=`HDB stop`
-if [ $? -ne 0 ]; then
-	echo "$output"
-	echo "Failed to stop HDB."
-	exit 1
-fi
-output=`HDB start`
-if [ $? -ne 0 ]; then
-	echo "$output"
-	echo "Failed to start HDB."
-	exit 1
-fi
 
 registerCockpit
 

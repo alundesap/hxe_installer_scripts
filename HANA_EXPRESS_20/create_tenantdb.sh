@@ -28,7 +28,7 @@ Usage:
    -up  <"true"|"false">            Use proxy server
    -ph  <proxy_host>                Proxy host
    -pp  <proxy_port>                Proxy port
-   -nph <no_proxy_hosts>            Comma separated list of hosts that do not
+   -nph <no_proxy_hosts>            Comma separated domains that do not
                                     need proxy.
 
    -h                               Print this help
@@ -75,7 +75,7 @@ promptUserPwd() {
 	fi
 
 	if [ -z "`echo ${!4}`" ]; then
-		read -s -p "Enter $default_user user password: " pwd
+		read -r -s -p "Enter $default_user user password: " pwd
 		eval $4=\$pwd
 	fi
 
@@ -162,12 +162,16 @@ promptProxyInfo() {
 	getSystemHTTPProxy
 
 	if [ -z "$use_proxy" ]; then
+		local prompt_msg="Do you need to use proxy server to access the internet? [N] : "
+		if [ -n "$system_proxy_host" ]; then
+			prompt_msg="Do you need to use proxy server to access the internet? [Y] : "
+		fi
 		while [ 1 ] ; do
-			read -p "Do you need to use proxy server to access the internet? (Y/N): " tmp
-			if [ "$tmp" == "Y" -o "$tmp" == "y" ]; then
+			read -p "$prompt_msg" tmp
+			if [ "$tmp" == "Y" -o "$tmp" == "y" ] || [ -z "$tmp" -a -n "$system_proxy_host" ]; then
 				use_proxy=1
 				break
-			elif [ "$tmp" == "N" -o "$tmp" == "n" ]; then
+			elif [ "$tmp" == "N" -o "$tmp" == "n" ] || [ -z "$tmp" -a -z "$system_proxy_host" ]; then
 				use_proxy=0
 				break
 			else
@@ -232,10 +236,20 @@ promptProxyInfo() {
 			no_proxy_host="$system_no_proxy_host"
 		else
 			no_proxy_host="$tmp"
+			no_proxy_host="$(addLocalHostToNoProxy "$no_proxy_host")"
 		fi
 	fi
 }
 
+
+# Trim leading and trailing spaces
+trim()
+{
+        local trimmed="$1"
+        trimmed=${trimmed%% }
+        trimmed=${trimmed## }
+        echo "$trimmed"
+}
 
 ############################################################################################
 # Get the system proxy host and port
@@ -309,6 +323,47 @@ getSystemHTTPProxy() {
 		system_no_proxy_host="${system_no_proxy_host%\'}"
 		system_no_proxy_host="${system_no_proxy_host#\'}"
 	fi
+
+	if [[ -n "$system_no_proxy_host" ]]; then
+		system_no_proxy_host="$(addLocalHostToNoProxy "$system_no_proxy_host")"
+	fi
+}
+
+addLocalHostToNoProxy() {
+	if [ -z "$1" ]; then
+		return
+	fi
+
+	local no_ph=$1
+	local has_localhost=0
+	local has_localhost_name=0
+	local has_localhost_ip=0
+
+	IFS=',' read -ra hlist <<< "$no_ph"
+	for i in "${hlist[@]}"; do
+		tmp=$(trim "$i")
+		if [ -n "${tmp}" ]; then
+			if [[ "${tmp}" =~ [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt] ]]; then
+				has_localhost=1
+			elif echo ${tmp} | grep -i "^${host_name}$" >& /dev/null; then
+				has_localhost_name=1
+			elif [[ "$tmp" == "127.0.0.1" ]]; then
+				has_localhost_ip=1
+			fi
+		fi
+	done
+
+	if [ $has_localhost_ip -eq 0 ]; then
+		no_ph="127.0.0.1, ${no_ph}"
+	fi
+	if [ $has_localhost_name -eq 0 ]; then
+		no_ph="${host_name}, ${no_ph}"
+	fi
+	if [ $has_localhost -eq 0 ]; then
+		no_ph="localhost, ${no_ph}"
+	fi
+
+	echo ${no_ph}
 }
 
 isValidHostName() {
@@ -333,7 +388,7 @@ isValidPort() {
 ############################################################################################
 createTenantDB(){
 	echo "Create tenant database $tenant_db..."
-	if [[ -z $(hdbsql -i ${instance_number} -d SystemDB -u $system -p "$system_pwd" "create database $tenant_db system user password \"$system_pwd\"" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d SystemDB -u $system -p $system_pwd "create database $tenant_db system user password \"$system_pwd\"" | grep "0 rows affected") ]]; then
 		echo "  ERROR: Fail to create tenant database $tenant_db"
 		exit 1
 	fi
@@ -344,13 +399,13 @@ createTenantDB(){
 ############################################################################################
 createTechUserAndUpdateUrl() {
 	echo "Create telemetry technical user $tech_user on $tenant_db database..."
-	hdbsql -i $instance_number -d $tenant_db -u $system -p "$system_pwd" "CREATE USER $tech_user PASSWORD \"$tech_user_pwd\" NO FORCE_FIRST_PASSWORD_CHANGE" 
-	hdbsql -i $instance_number -d $tenant_db -u $system -p "$system_pwd" "ALTER USER $tech_user DISABLE PASSWORD LIFETIME" 
+	hdbsql -i $instance_number -d $tenant_db -u $system -p $system_pwd "CREATE USER $tech_user PASSWORD \"$tech_user_pwd\" NO FORCE_FIRST_PASSWORD_CHANGE"
+	hdbsql -i $instance_number -d $tenant_db -u $system -p $system_pwd "ALTER USER $tech_user DISABLE PASSWORD LIFETIME"
 	# wait a little bit before granting permission
 	sleep 60s
-	hdbsql -i $instance_number -d $tenant_db -u $system -p "$system_pwd" "grant SELECT, INSERT, UPDATE, DELETE, EXECUTE on schema _SYS_TELEMETRY to $tech_user" 
-	hdbsql -i $instance_number -d $tenant_db -u $system -p "$system_pwd" "grant SELECT on schema _SYS_STATISTICS to $tech_user" 
-	hdbsql -i $instance_number -d $tenant_db -u $system -p "$system_pwd" "grant CATALOG READ to $tech_user" 
+	hdbsql -i $instance_number -d $tenant_db -u $system -p $system_pwd "grant SELECT, INSERT, UPDATE, DELETE, EXECUTE on schema _SYS_TELEMETRY to $tech_user"
+	hdbsql -i $instance_number -d $tenant_db -u $system -p $system_pwd "grant SELECT on schema _SYS_STATISTICS to $tech_user"
+	hdbsql -i $instance_number -d $tenant_db -u $system -p $system_pwd "grant CATALOG READ to $tech_user"
 
 	echo "Change telemetry URL for $tenant_db database..."
 	${PROG_DIR}/hxe_telemetry.sh -d $tenant_db -i $instance_number -u $tech_user -c "${TEL_URL}" <<-EOF
@@ -411,6 +466,7 @@ tech_user=""
 tech_user_pwd=""
 tenant_db=""
 space="SAP"
+host_name=`basename $SAP_RETRIEVAL_PATH`
 use_proxy=""
 system_proxy_host=""
 system_proxy_port=""

@@ -100,7 +100,7 @@ promptInstanceNumber() {
 #
 promptPwd() {
 	local pwd=""
-	read -s -p "Enter ${1} password: " pwd
+	read -r -s -p "Enter ${1} password: " pwd
 	eval $2=\$pwd
 
 	echo
@@ -132,7 +132,7 @@ changeSSFSKeys() {
 # Set root key backup password
 #########################################################
 setRootKeyBackupPwd() {
-	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "ALTER SYSTEM SET ENCRYPTION ROOT KEYS BACKUP PASSWORD \"$backup_pwd\"" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "ALTER SYSTEM SET ENCRYPTION ROOT KEYS BACKUP PASSWORD \"$backup_pwd\"" | grep "0 rows affected") ]]; then
 		echo "Fail to set root key backup password for $db_name!"
 		exit 1
 	else
@@ -146,7 +146,7 @@ setRootKeyBackupPwd() {
 #########################################################
 generateRootKey() {
 	#Data Volumn Encryption
-	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "ALTER SYSTEM PERSISTENCE ENCRYPTION CREATE NEW ROOT KEY WITHOUT ACTIVATE" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "ALTER SYSTEM PERSISTENCE ENCRYPTION CREATE NEW ROOT KEY WITHOUT ACTIVATE" | grep "0 rows affected") ]]; then
 		echo "Fail to generate root key for data volume of $db_name!"
 		exit 1
 	else
@@ -154,7 +154,7 @@ generateRootKey() {
 	fi
 
 	#Redo log Encryption
-	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "ALTER SYSTEM LOG ENCRYPTION CREATE NEW ROOT KEY WITHOUT ACTIVATE" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "ALTER SYSTEM LOG ENCRYPTION CREATE NEW ROOT KEY WITHOUT ACTIVATE" | grep "0 rows affected") ]]; then
 		echo "Fail to generate root key for redo log of $db_name!"
 		exit 1
 	else
@@ -162,7 +162,7 @@ generateRootKey() {
 	fi
 
 	#Internal Application Encryption
-	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "ALTER SYSTEM APPLICATION ENCRYPTION CREATE NEW ROOT KEY WITHOUT ACTIVATE" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "ALTER SYSTEM APPLICATION ENCRYPTION CREATE NEW ROOT KEY WITHOUT ACTIVATE" | grep "0 rows affected") ]]; then
 		echo "Fail to generate root key for internal application of $db_name!"
 		exit 1
 	else
@@ -174,7 +174,7 @@ generateRootKey() {
 # Backup root key
 #########################################################
 backupRootKey() {
-	hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "SELECT ENCRYPTION_ROOT_KEYS_EXTRACT_KEYS ('PERSISTENCE, APPLICATION, LOG') FROM DUMMY" > $backup_dir/$db_name.rkb
+	hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "SELECT ENCRYPTION_ROOT_KEYS_EXTRACT_KEYS ('PERSISTENCE, APPLICATION, LOG') FROM DUMMY" > $backup_dir/$db_name.rkb
 	echo "Root key for $db_name is backed up to $backup_dir/$db_name.rkb!"
 }
 
@@ -183,7 +183,7 @@ backupRootKey() {
 #########################################################
 activateRootKey() {
 	#Data Volumn Encryption
-	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "ALTER SYSTEM PERSISTENCE ENCRYPTION ACTIVATE NEW ROOT KEY" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "ALTER SYSTEM PERSISTENCE ENCRYPTION ACTIVATE NEW ROOT KEY" | grep "0 rows affected") ]]; then
 		echo "Fail to activate root key for data volume of $db_name!"
 		exit 1
 	else
@@ -191,7 +191,7 @@ activateRootKey() {
 	fi
 
 	#Redo log Encryption
-	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "ALTER SYSTEM LOG ENCRYPTION ACTIVATE NEW ROOT KEY" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "ALTER SYSTEM LOG ENCRYPTION ACTIVATE NEW ROOT KEY" | grep "0 rows affected") ]]; then
 		echo "Fail to activate root key for redo log of $db_name!"
 		exit 1
 	else
@@ -199,7 +199,7 @@ activateRootKey() {
 	fi
 
 	#Internal Application Encryption
-	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p "${system_pwd}" "ALTER SYSTEM APPLICATION ENCRYPTION ACTIVATE NEW ROOT KEY" | grep "0 rows affected") ]]; then
+	if [[ -z $(hdbsql -i ${instance_number} -d $db_name -u SYSTEM  -p ${system_pwd} "ALTER SYSTEM APPLICATION ENCRYPTION ACTIVATE NEW ROOT KEY" | grep "0 rows affected") ]]; then
 		echo "Fail to activate root key for internal application of $db_name!"
 		exit 1
 	else

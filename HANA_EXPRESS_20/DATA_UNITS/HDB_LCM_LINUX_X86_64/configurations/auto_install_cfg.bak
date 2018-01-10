@@ -111,13 +111,13 @@ reference_data_path=USE_DEFAULT
 xs_ea_data_path=USE_DEFAULT
 
 # Customer Organization Name
-org_name=MTV
+org_name=HANAExpress
 
 # XS Advanced Admin User
 org_manager_user=XSA_ADMIN
 
 # Customer Space Name
-prod_space_name=DEV
+prod_space_name=development
 
 xs_customer_space_isolation=off
 xs_sap_space_isolation=off
@@ -125,6 +125,6 @@ xs_sap_space_isolation=off
 # XS Advanced Components
 xs_components=all
 
-xs_routing_mode=hostnames
+xs_routing_mode=ports
 
-xs_domain_name=yo.mtv.com
+xs_domain_name=USE_DEFAULT

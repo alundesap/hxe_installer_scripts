@@ -33,13 +33,49 @@ cmd='sed -i -e "s/prod_space_name=development/prod_space_name='$devspace'/g" aut
 echo $cmd
 #eval $cmd
 
-cmd="cd ../../../.."
+cmd="cd ../../.."
+echo $cmd
+#eval $cmd
+
+cmd="cp hxe_optimize.sh hxe_optimize_sh.bak"
+echo $cmd
+#eval $cmd
+
+cmd="cp hxe_upgrade.sh hxe_upgrade_sh.bak"
+echo $cmd
+#eval $cmd
+
+cmd='sed -i -e "s/HANAExpress/'$orgname'/g" hxe_optimize.sh'
+echo $cmd
+#eval $cmd
+
+cmd='sed -i -e "s/HANAExpress/'$orgname'/g" hxe_upgrade.sh'
+echo $cmd
+#eval $cmd
+
+cmd='sed -i -e "s/DEV_SPACE_NAME=\"development\"/DEV_SPACE_NAME=\"'$devspace'\"/g" hxe_optimize.sh'
+echo $cmd
+#eval $cmd
+
+cmd='sed -i -e "s/DEV_SPACE_NAME=\"development\"/DEV_SPACE_NAME=\"'$devspace'\"/g" hxe_upgrade.sh'
+echo $cmd
+#eval $cmd
+
+cmd="cd .."
 echo $cmd
 #eval $cmd
 
 echo "Reset with..."
-echo "cp HANA_EXPRESS_20/DATA_UNITS/HDB_LCM_LINUX_X86_64/configurations/auto_install_cfg.bak HANA_EXPRESS_20/DATA_UNITS/HDB_LCM_LINUX_X86_64/configurations/auto_install.cfg"
+echo "cp HANA_EXPRESS_20/DATA_UNITS/HDB_LCM_LINUX_X86_64/configurations/auto_install_cfg.orig HANA_EXPRESS_20/DATA_UNITS/HDB_LCM_LINUX_X86_64/configurations/auto_install.cfg"
 
 echo ""
-echo "Now run the setup_hxe.sh script"
+echo 'Verify that your /etc/hosts file contains '$fqdn' on the loopback(127.0.0.1) line and no others.'
+echo "Example.."
+echo '127.0.0.1       localhost '$fqdn
+
+echo ""
+echo 'Also verify that external wildcard DNS resolution is correctly reports various hostname combinations like abc.'$fqdn' or xyz.'$fqdn' as the EXTERNAL IP address of your server.'
+echo ""
+echo ""
+echo 'Now run the setup_hxe.sh script.  Supply '$fqdn' when prompted for the server hostname.'
 echo ""
